@@ -288,6 +288,7 @@ async function importFile(filePath: string): Promise<number> {
   }
 
   let eventsInserted = 0;
+  let eventsSkippedDuplicate = 0;
   for (const day of data.EducatorEventsDays || []) {
     for (const ev of day.DayStudyEvents || []) {
       // Expand Dates into actual session dates.
@@ -317,10 +318,39 @@ async function importFile(filePath: string): Promise<number> {
         const globalEventHash = hashEvent(ev, startDateTime, endDateTime, true);
         const lectureHash = hashEvent(ev, startDateTime, endDateTime, false);
 
-        // Ensure locations exist.
+        // ---- Pre-insert duplicate check ----
+        // Skip if this exact event row (same primary educator + same start +
+        // same subject + same globalEventHash) is already in the DB. This
+        // makes the importer idempotent without relying on try/catch around
+        // create(), and avoids losing the whole event when a nested create
+        // (locations/groups/co-educators) hits a composite-key violation.
+        const existing = await db.scheduleEvent.findFirst({
+          where: {
+            educatorId: data.EducatorMasterId,
+            startDateTime,
+            subjectId: subject.id,
+            globalEventHash,
+          },
+          select: { id: true },
+        });
+        if (existing) {
+          // Already imported — skip this date entirely.
+          eventsSkippedDuplicate++;
+          continue;
+        }
+
+        // ---- Ensure locations exist (deduped by DisplayName) ----
+        // The same physical room can appear multiple times in
+        // `EventLocations` (e.g., once per co-educator or per group). We
+        // dedupe by DisplayName BEFORE building the link list, otherwise
+        // the nested create would insert two rows with the same
+        // (eventId, locationId) and violate the @@id composite key.
         const locationIds: number[] = [];
+        const seenLocationNames = new Set<string>();
         for (const loc of ev.EventLocations || []) {
           if (loc.IsEmpty || !loc.DisplayName) continue;
+          if (seenLocationNames.has(loc.DisplayName)) continue;
+          seenLocationNames.add(loc.DisplayName);
           const location = await db.location.upsert({
             where: { displayName: loc.DisplayName },
             create: {
@@ -333,10 +363,15 @@ async function importFile(filePath: string): Promise<number> {
           locationIds.push(location.id);
         }
 
-        // Ensure groups exist.
+        // ---- Ensure groups exist (deduped by Item1) ----
+        // `ContingentUnitNames` may list the same group twice; dedupe to
+        // avoid violating @@id([eventId, groupId]).
         const groupIds: number[] = [];
+        const seenGroupNames = new Set<string>();
         for (const g of ev.ContingentUnitNames || []) {
           if (!g.Item1) continue;
+          if (seenGroupNames.has(g.Item1)) continue;
+          seenGroupNames.add(g.Item1);
           const group = await db.group.upsert({
             where: { name: g.Item1 },
             create: { name: g.Item1 },
@@ -345,13 +380,42 @@ async function importFile(filePath: string): Promise<number> {
           groupIds.push(group.id);
         }
 
-        // Ensure co-educators (with synthetic ids) exist as Educator rows.
+        // ---- Ensure co-educators exist (deduped by Item2) ----
+        // `EducatorIds` may list the same educator multiple times. We also
+        // exclude the primary educator (the file owner) — their link is
+        // already the row's own `educatorId`, so adding them as a
+        // co-educator is redundant and would waste a row.
+        //
+        // The primary educator's entry in `EducatorIds` typically looks like
+        // "<EducatorDisplayText>, <title>" (e.g., "Петросян Л. А., профессор"),
+        // while `data.EducatorDisplayText` is just "Петросян Л. А." (without
+        // the title). So we use `startsWith(EducatorDisplayText + ",")` OR
+        // exact equality to identify the primary educator robustly.
         const coEducatorIds: number[] = [];
+        const seenCoEducatorIds = new Set<number>();
+        const seenCoEducatorDisplayTexts = new Set<string>();
+        const primaryDisplayText = data.EducatorDisplayText;
+        const primaryDisplayTextWithComma = primaryDisplayText + ',';
         for (const ce of ev.EducatorIds || []) {
           if (!ce.Item2) continue;
-          // Skip the primary educator (same display text as the file's owner) — that link is the row's own educatorId.
-          if (ce.Item2 === data.EducatorDisplayText) continue;
+          // Skip the primary educator (file owner) — they're already the row's educatorId.
+          if (
+            ce.Item2 === primaryDisplayText ||
+            ce.Item2.startsWith(primaryDisplayTextWithComma)
+          ) {
+            continue;
+          }
+          // Skip duplicates by display text (different entries can have the
+          // same display text, which maps to the same synthetic id).
+          if (seenCoEducatorDisplayTexts.has(ce.Item2)) continue;
+          seenCoEducatorDisplayTexts.add(ce.Item2);
+
           const synthId = getCoEducatorId(ce.Item2);
+          // Defensive: dedupe by synthId too, in case two different display
+          // texts somehow mapped to the same id.
+          if (seenCoEducatorIds.has(synthId)) continue;
+          seenCoEducatorIds.add(synthId);
+
           await db.educator.upsert({
             where: { id: synthId },
             create: {
@@ -367,7 +431,12 @@ async function importFile(filePath: string): Promise<number> {
           coEducatorIds.push(synthId);
         }
 
-        // Insert the event (skip duplicates via unique constraint).
+        // ---- Insert the event ----
+        // All join-table link arrays (locationIds, groupIds, coEducatorIds)
+        // are already deduped above, so the nested create cannot violate
+        // the @@id composite keys. We also already checked for an existing
+        // row with the same composite unique key, so create() should not
+        // raise a unique-constraint violation on ScheduleEvent itself.
         try {
           const created = await db.scheduleEvent.create({
             data: {
@@ -399,13 +468,15 @@ async function importFile(filePath: string): Promise<number> {
           // suppress unused warning
           void created;
         } catch (e) {
-          // Likely unique-constraint violation — skip duplicate.
-          if (!String((e as Error).message).includes('Unique constraint')) {
-            console.error(`Error inserting event for ${filePath}:`, (e as Error).message);
-          }
+          // Should be rare now (we dedupe + findFirst above), but if it
+          // still happens (e.g., a race), log and continue.
+          console.error(`Error inserting event for ${filePath}:`, (e as Error).message);
         }
       }
     }
+  }
+  if (eventsSkippedDuplicate > 0) {
+    console.log(`  (${eventsSkippedDuplicate} duplicate date(s) skipped in ${filePath})`);
   }
   return eventsInserted;
 }
