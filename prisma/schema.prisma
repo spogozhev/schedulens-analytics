@@ -1,0 +1,155 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================
+// Schedule analytics domain models
+// =====================================================
+
+/// A teacher / educator. The id is the source-system `EducatorMasterId`.
+model Educator {
+  id           Int       @id
+  displayName  String
+  longName     String
+  scheduleFrom DateTime?
+  scheduleTo   DateTime?
+  isSpringTerm Boolean    @default(true)
+
+  events           ScheduleEvent[]          @relation("PrimaryEducatorEvents")
+  coTeachingEvents ScheduleEventEducator[]
+
+  @@index([scheduleFrom, scheduleTo])
+}
+
+/// A classroom / physical location. Unique by `displayName`.
+model Location {
+  id          Int    @id @default(autoincrement())
+  displayName String @unique
+  latitude    Float?
+  longitude   Float?
+
+  events ScheduleEventLocation[]
+
+  @@index([displayName])
+}
+
+/// A subject. Unique by name.
+model Subject {
+  id     Int    @id @default(autoincrement())
+  name   String @unique
+  events ScheduleEvent[]
+
+  @@index([name])
+}
+
+/// A student group / contingent unit. Unique by name.
+model Group {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  events ScheduleEventGroup[]
+
+  @@index([name])
+}
+
+/// A single schedule session (one teacher + one time slot).
+/// The same physical lecture delivered by several teachers appears as one row per teacher.
+/// Rows belonging to the same physical lecture share `globalEventHash`.
+model ScheduleEvent {
+  id        String @id @default(cuid())
+  educatorId Int
+  educator  Educator @relation("PrimaryEducatorEvents", fields: [educatorId], references: [id])
+  subjectId Int
+  subject   Subject  @relation(fields: [subjectId], references: [id])
+
+  // Date / time fields (UTC instants)
+  startDateTime   DateTime
+  endDateTime     DateTime
+  rawStart        String   // "11:00:00"
+  rawEnd          String?  // "12:30:00" — null/empty when not specified
+  hasInferredEnd  Boolean  @default(false) // true when End was missing and we used +90min
+  durationMinutes Int
+
+  // Day-of-week label as in the source file (1=Mon…7=Sun)
+  dayOfWeek Int
+  dayString String
+  dateStr   String // original Dates string e.g. "2.6" or "с 17.2 по 19.5 (14)"
+
+  // Schedule term info
+  termFrom     DateTime
+  termTo       DateTime
+  isSpringTerm Boolean
+
+  // Misc
+  isCanceled           Boolean @default(false)
+  kindCode             Int     @default(0)
+  educatorsDisplayText String
+
+  // Groups events of the same teacher that overlap in time.
+  // Events in the same group are "simultaneous" — the teacher is in fact in one place
+  // delivering several listed classes at once.
+  simultaneousGroupId String?
+
+  // Identifies the same physical lecture across multiple teacher JSON files
+  // (used to dedupe room utilization and counts of unique lectures).
+  // Includes subject + start + end + sorted locations + sorted educators.
+  // EXCLUDES groups: the same physical lecture delivered to multiple groups
+  // produces multiple rows (one per group) all sharing this `globalEventHash`.
+  globalEventHash String
+
+  // Identifies the same physical lecture IGNORING the audience — used to
+  // dedupe room utilization (one physical lecture = one utilization slot).
+  lectureHash String
+
+  // Relations
+  locations     ScheduleEventLocation[]
+  coEducators   ScheduleEventEducator[]
+  groups        ScheduleEventGroup[]
+
+  @@unique([educatorId, startDateTime, subjectId, globalEventHash])
+  @@index([educatorId, startDateTime])
+  @@index([startDateTime])
+  @@index([endDateTime])
+  @@index([subjectId])
+  @@index([simultaneousGroupId])
+  @@index([globalEventHash])
+  @@index([lectureHash])
+  @@index([kindCode])
+}
+
+model ScheduleEventLocation {
+  eventId    String
+  locationId Int
+  event      ScheduleEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  location   Location      @relation(fields: [locationId], references: [id])
+
+  @@id([eventId, locationId])
+  @@index([locationId])
+}
+
+model ScheduleEventEducator {
+  eventId    String
+  educatorId Int
+  event      ScheduleEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  educator   Educator     @relation(fields: [educatorId], references: [id])
+
+  @@id([eventId, educatorId])
+  @@index([educatorId])
+}
+
+model ScheduleEventGroup {
+  eventId String
+  groupId Int
+  event   ScheduleEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  group   Group         @relation(fields: [groupId], references: [id])
+
+  @@id([eventId, groupId])
+  @@index([groupId])
+}
