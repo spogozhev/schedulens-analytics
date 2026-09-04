@@ -389,48 +389,297 @@ B: 19:00–20:30 и C: 18:40–19:10 — A и B касаются граница�
 
 ## Развёртывание на сервере (production)
 
-### Через Bun standalone
+Эта инструкция предполагает, что на сервере уже установлен **Node.js 20+**
+и **npm** (или **pnpm** / **yarn** — команды ниже адаптируйте под свой пакетный
+менеджер). Bun НЕ требуется — мы используем его только в скрипте `package.json`
+для удобства локально, но продакшен-сборка запускается на чистом Node.js.
+
+### 0. Проверка окружения
 
 ```bash
-# На сервере:
-git clone <repo> && cd <repo>
-bun install --production
-bun run db:push
-bun run scripts/import-schedules.ts /путь/к/json
-
-# Собрать
-bun run build
-
-# Запустить (можно под systemd / pm2 / supervisord)
-NODE_ENV=production bun run start
+node --version   # должно быть v20.x или выше
+npm --version    # должно быть 9.x или выше
+git --version    # для клонирования репозитория
 ```
 
-### Docker (минимальный пример)
+Если Node.js < 20, обновите через NodeSource или nvm:
+
+```bash
+# через nvm (рекомендуется):
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
+source ~/.bashrc
+nvm install 20
+nvm use 20
+
+# или через NodeSource (Ubuntu/Debian):
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+### 1. Клонирование и установка зависимостей
+
+```bash
+git clone <repo-url> schedule-analytics
+cd schedule-analytics
+
+# Установить все зависимости (включая devDependencies — нужны для prisma generate)
+npm install
+```
+
+> ⚠️ Не используйте `npm install --production` — Prisma требует devDependencies
+> для генерации клиента. Production-зависимости будут отделены на этапе build.
+
+### 2. Настройка переменных окружения
+
+Создайте файл `.env` в корне проекта:
+
+```bash
+# Абсолютный путь к SQLite-файлу (рекомендуется абсолютный путь,
+# чтобы он не зависел от текущей директории запуска).
+# Директория должна существовать и быть доступной для записи.
+DATABASE_URL=file:/var/lib/schedule-analytics/custom.db
+```
+
+Создайте директорию под базу данных:
+
+```bash
+sudo mkdir -p /var/lib/schedule-analytics
+sudo chown -R $USER:$USER /var/lib/schedule-analytics
+```
+
+### 3. Инициализация базы данных
+
+```bash
+# Сгенерировать Prisma-клиент (создаёт ./node_modules/@prisma/client)
+npm run db:generate
+
+# Применить схему к SQLite (создаст файл из DATABASE_URL)
+npm run db:push
+```
+
+После этого в `/var/lib/schedule-analytics/` появится пустой файл `custom.db`.
+
+### 4. Импорт расписания
+
+```bash
+# Положить JSON-файлы в любую директорию (можно с подпапками)
+mkdir -p /var/lib/schedule-analytics/schedules
+# scp или rsync ваших JSON-файлов в эту директорию
+
+# Запустить импорт (используйте npx для запуска TypeScript-скрипта через tsx)
+npx tsx scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
+```
+
+> ⚠️ Импорт НЕ очищает базу данных. Повторный запуск того же файла
+> пропустит все события как дубликаты. Для обновления изменённых
+> данных используйте `npm run db:push --force-reset` (полная очистка).
+
+### 5. Сборка production-бандла
+
+```bash
+# Собрать standalone-бандл в .next/standalone/
+npm run build
+```
+
+Эта команда:
+- собирает Next.js в `.next/standalone/` (включает `server.js` и
+  минимальные `node_modules`);
+- копирует `.next/static/` и `public/` в `standalone/`.
+
+### 6. Запуск production-сервера
+
+Создайте файл `start.sh` в корне проекта для запуска под Node.js:
+
+```bash
+cat > start.sh << 'EOF'
+#!/usr/bin/env bash
+set -e
+cd "$(dirname "$0")"
+export NODE_ENV=production
+export DATABASE_URL=file:/var/lib/schedule-analytics/custom.db
+exec node .next/standalone/server.js
+EOF
+chmod +x start.sh
+
+# Проверка запуска вручную:
+./start.sh
+# Откройте http://<server-ip>:3000 — дашборд должен загрузиться
+```
+
+> ⚠️ Production-сервер слушает порт 3000 по умолчанию. Чтобы изменить,
+> отредактируйте `next.config.ts` (добавьте `server: { port: <port> }`) и
+> пересоберите.
+
+### 7. Запуск как сервис (systemd)
+
+Создайте unit-файл:
+
+```bash
+sudo tee /etc/systemd/system/schedule-analytics.service << 'EOF'
+[Unit]
+Description=Schedule Analytics Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=<your-username>
+WorkingDirectory=/opt/schedule-analytics
+Environment=NODE_ENV=production
+Environment=DATABASE_URL=file:/var/lib/schedule-analytics/custom.db
+Environment=PORT=3000
+ExecStart=/usr/bin/node /opt/schedule-analytics/.next/standalone/server.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable schedule-analytics
+sudo systemctl start schedule-analytics
+sudo systemctl status schedule-analytics
+```
+
+Просмотр логов:
+
+```bash
+sudo journalctl -u schedule-analytics -f
+```
+
+Перезапуск:
+
+```bash
+sudo systemctl restart schedule-analytics
+```
+
+### 8. Reverse proxy (Nginx)
+
+Production обычно запускается за Nginx, чтобы терминировать TLS и
+пробрасывать трафик на Node.js:
+
+```bash
+sudo tee /etc/nginx/sites-available/schedule-analytics << 'EOF'
+server {
+    listen 80;
+    server_name analytics.example.com;
+
+    # Редирект на HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name analytics.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/analytics.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/analytics.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+
+sudo ln -s /etc/nginx/sites-available/schedule-analytics /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+
+# Получить TLS-сертификат через Let's Encrypt:
+sudo certbot --nginx -d analytics.example.com
+```
+
+### 9. Обновление приложения
+
+```bash
+cd /opt/schedule-analytics
+
+# 1. Получить новые изменения
+git pull origin main
+
+# 2. Установить новые зависимости (если package.json изменился)
+npm install
+
+# 3. Перегенерировать Prisma-клиент (если schema.prisma изменилась)
+npm run db:generate
+npm run db:push   # безопасно — не дропает данные, только добавляет новые поля/таблицы
+
+# 4. Пересобрать
+npm run build
+
+# 5. Перезапустить сервис
+sudo systemctl restart schedule-analytics
+```
+
+### 10. Обновление данных расписания
+
+Дашборд читает БД в реальном времени — **сервер перезапускать не нужно**:
+
+```bash
+# 1. Положить новые JSON-файлы в папку расписаний
+# 2. Остановить web-сервер (важно — иначе SQLite будет блокировать запись)
+sudo systemctl stop schedule-analytics
+
+# 3. Импортировать новые данные (добавятся к существующим)
+npx tsx scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
+
+# 4. Запустить web-сервер обратно
+sudo systemctl start schedule-analytics
+```
+
+> ⚠️ Web-сервер и импорт-скрипт не должны работать одновременно —
+> SQLite поддерживает один writer. Перед импортом остановите
+> `schedule-analytics` сервис.
+
+### 11. Резервное копирование
+
+```bash
+# SQLite — это один файл, можно просто копировать
+sudo cp /var/lib/schedule-analytics/custom.db /backup/custom-$(date +%Y%m%d).db
+
+# Лучше использовать .backup (создаёт согласованную копию):
+sqlite3 /var/lib/schedule-analytics/custom.db ".backup /backup/custom-$(date +%Y%m%d).db"
+
+# Cron для ежедневного бэкапа (в 3:00 ночи):
+crontab -e
+# Добавьте строку:
+0 3 * * * sqlite3 /var/lib/schedule-analytics/custom.db ".backup /backup/custom-$(date +\%Y\%m\%d).db" && find /backup -name "custom-*.db" -mtime +30 -delete
+```
+
+### Docker (альтернатива)
+
+Если предпочитаете Docker — минимальный `Dockerfile`:
 
 ```dockerfile
-FROM oven/bun:1.3
+FROM node:20-slim
 WORKDIR /app
+COPY package*.json ./
+RUN npm ci
 COPY . .
-RUN bun install --production
-RUN bun run db:push
-RUN bun run build
+RUN npm run db:generate && npm run build
 EXPOSE 3000
-CMD ["bun", "run", "start"]
+ENV NODE_ENV=production
+ENV DATABASE_URL=file:/data/custom.db
+CMD ["node", ".next/standalone/server.js"]
 ```
 
 ```bash
 docker build -t schedule-analytics .
-docker run -p 3000:3000 -v $(pwd)/db:/app/db -v /path/to/json:/data schedule-analytics \
-  sh -c "bun run scripts/import-schedules.ts /data && bun run start"
-```
-
-### Обновление данных
-
-```bash
-# 1. Положить новые JSON в папку
-# 2. Перезапустить импорт (он идемпотентный)
-bun run scripts/import-schedules.ts /путь/к/json
-# 3. Перезапустить сервер не нужно — дашборд читает БД в реальном времени
+docker run -d \
+  --name schedule-analytics \
+  -p 3000:3000 \
+  -v /var/lib/schedule-analytics:/data \
+  -v /var/lib/schedule-analytics/schedules:/app/upload \
+  schedule-analytics
 ```
 
 ---
