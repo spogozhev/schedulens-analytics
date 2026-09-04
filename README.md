@@ -389,31 +389,26 @@ B: 19:00–20:30 и C: 18:40–19:10 — A и B касаются граница�
 
 ## Развёртывание на сервере (production)
 
-Эта инструкция предполагает, что на сервере уже установлен **Node.js 20+**
-и **npm** (или **pnpm** / **yarn** — команды ниже адаптируйте под свой пакетный
-менеджер). Bun НЕ требуется — мы используем его только в скрипте `package.json`
-для удобства локально, но продакшен-сборка запускается на чистом Node.js.
+Эта инструкция предполагает, что на сервере уже установлен **Bun 1.3+**
+и **git**. Bun — это пакетный менеджер, runtime и bundler в одном флаконе,
+поэтому отдельная установка Node.js или npm не требуется (Bun умеет
+запускать `.js`/`.ts`-файлы и `package.json`-скрипты напрямую).
 
 ### 0. Проверка окружения
 
 ```bash
-node --version   # должно быть v20.x или выше
-npm --version    # должно быть 9.x или выше
+bun --version    # должно быть 1.3.x или выше
 git --version    # для клонирования репозитория
 ```
 
-Если Node.js < 20, обновите через NodeSource или nvm:
+Если Bun не установлен или версия ниже 1.3:
 
 ```bash
-# через nvm (рекомендуется):
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
-source ~/.bashrc
-nvm install 20
-nvm use 20
+# Установка/обновление Bun (официальный способ):
+curl -fsSL https://bun.sh/install | bash
 
-# или через NodeSource (Ubuntu/Debian):
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
+# После установки перезагрузите shell или:
+source ~/.bashrc
 ```
 
 ### 1. Клонирование и установка зависимостей
@@ -422,12 +417,13 @@ sudo apt-get install -y nodejs
 git clone <repo-url> schedule-analytics
 cd schedule-analytics
 
-# Установить все зависимости (включая devDependencies — нужны для prisma generate)
-npm install
+# Bun-эквивалент `npm install` — намного быстрее (10–100×)
+bun install
 ```
 
-> ⚠️ Не используйте `npm install --production` — Prisma требует devDependencies
-> для генерации клиента. Production-зависимости будут отделены на этапе build.
+> ℹ️ Bun устанавливает все зависимости (включая devDependencies) по умолчанию.
+> Для production-окружения это нормально — Prisma требует devDependencies
+> для генерации клиента (`prisma generate`).
 
 ### 2. Настройка переменных окружения
 
@@ -451,10 +447,10 @@ sudo chown -R $USER:$USER /var/lib/schedule-analytics
 
 ```bash
 # Сгенерировать Prisma-клиент (создаёт ./node_modules/@prisma/client)
-npm run db:generate
+bun run db:generate
 
 # Применить схему к SQLite (создаст файл из DATABASE_URL)
-npm run db:push
+bun run db:push
 ```
 
 После этого в `/var/lib/schedule-analytics/` появится пустой файл `custom.db`.
@@ -466,19 +462,19 @@ npm run db:push
 mkdir -p /var/lib/schedule-analytics/schedules
 # scp или rsync ваших JSON-файлов в эту директорию
 
-# Запустить импорт (используйте npx для запуска TypeScript-скрипта через tsx)
-npx tsx scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
+# Bun умеет запускать TypeScript-файлы напрямую — tsx/npx не нужен
+bun run scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
 ```
 
 > ⚠️ Импорт НЕ очищает базу данных. Повторный запуск того же файла
 > пропустит все события как дубликаты. Для обновления изменённых
-> данных используйте `npm run db:push --force-reset` (полная очистка).
+> данных используйте `bun run db:push --force-reset` (полная очистка).
 
 ### 5. Сборка production-бандла
 
 ```bash
 # Собрать standalone-бандл в .next/standalone/
-npm run build
+bun run build
 ```
 
 Эта команда:
@@ -488,7 +484,7 @@ npm run build
 
 ### 6. Запуск production-сервера
 
-Создайте файл `start.sh` в корне проекта для запуска под Node.js:
+Создайте файл `start.sh` в корне проекта для запуска под Bun:
 
 ```bash
 cat > start.sh << 'EOF'
@@ -497,7 +493,7 @@ set -e
 cd "$(dirname "$0")"
 export NODE_ENV=production
 export DATABASE_URL=file:/var/lib/schedule-analytics/custom.db
-exec node .next/standalone/server.js
+exec bun .next/standalone/server.js
 EOF
 chmod +x start.sh
 
@@ -527,7 +523,7 @@ WorkingDirectory=/opt/schedule-analytics
 Environment=NODE_ENV=production
 Environment=DATABASE_URL=file:/var/lib/schedule-analytics/custom.db
 Environment=PORT=3000
-ExecStart=/usr/bin/node /opt/schedule-analytics/.next/standalone/server.js
+ExecStart=/home/<your-username>/.bun/bin/bun /opt/schedule-analytics/.next/standalone/server.js
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -542,6 +538,11 @@ sudo systemctl enable schedule-analytics
 sudo systemctl start schedule-analytics
 sudo systemctl status schedule-analytics
 ```
+
+> ℹ️ Путь к `bun` зависит от способа установки. Проверьте через `which bun`
+> и обновите `ExecStart` соответственно. Для системной установки это
+> обычно `/usr/local/bin/bun`, для пользовательской —
+> `/home/<username>/.bun/bin/bun`.
 
 Просмотр логов:
 
@@ -558,7 +559,7 @@ sudo systemctl restart schedule-analytics
 ### 8. Reverse proxy (Nginx)
 
 Production обычно запускается за Nginx, чтобы терминировать TLS и
-пробрасывать трафик на Node.js:
+пробрасывать трафик на Bun-сервер:
 
 ```bash
 sudo tee /etc/nginx/sites-available/schedule-analytics << 'EOF'
@@ -607,14 +608,14 @@ cd /opt/schedule-analytics
 git pull origin main
 
 # 2. Установить новые зависимости (если package.json изменился)
-npm install
+bun install
 
 # 3. Перегенерировать Prisma-клиент (если schema.prisma изменилась)
-npm run db:generate
-npm run db:push   # безопасно — не дропает данные, только добавляет новые поля/таблицы
+bun run db:generate
+bun run db:push   # безопасно — не дропает данные, только добавляет новые поля/таблицы
 
 # 4. Пересобрать
-npm run build
+bun run build
 
 # 5. Перезапустить сервис
 sudo systemctl restart schedule-analytics
@@ -622,7 +623,8 @@ sudo systemctl restart schedule-analytics
 
 ### 10. Обновление данных расписания
 
-Дашборд читает БД в реальном времени — **сервер перезапускать не нужно**:
+Дашборд читает БД в реальном времени — **сервер перезапускать не нужно**
+(но нужно остановить его на время импорта, см. ниже):
 
 ```bash
 # 1. Положить новые JSON-файлы в папку расписаний
@@ -630,14 +632,15 @@ sudo systemctl restart schedule-analytics
 sudo systemctl stop schedule-analytics
 
 # 3. Импортировать новые данные (добавятся к существующим)
-npx tsx scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
+bun run scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
 
 # 4. Запустить web-сервер обратно
 sudo systemctl start schedule-analytics
 ```
 
 > ⚠️ Web-сервер и импорт-скрипт не должны работать одновременно —
-> SQLite поддерживает один writer. Перед импортом остановите
+> SQLite поддерживает одного writer-а, а импорт использует
+> `PRAGMA locking_mode` для скорости. Перед импортом остановите
 > `schedule-analytics` сервис.
 
 ### 11. Резервное копирование
@@ -657,19 +660,20 @@ crontab -e
 
 ### Docker (альтернатива)
 
-Если предпочитаете Docker — минимальный `Dockerfile`:
+Если предпочитаете Docker — минимальный `Dockerfile` на базе официального
+Bun-образа:
 
 ```dockerfile
-FROM node:20-slim
+FROM oven/bun:1.3
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
+COPY package.json bun.lockb ./
+RUN bun install --frozen-lockfile
 COPY . .
-RUN npm run db:generate && npm run build
+RUN bun run db:generate && bun run build
 EXPOSE 3000
 ENV NODE_ENV=production
 ENV DATABASE_URL=file:/data/custom.db
-CMD ["node", ".next/standalone/server.js"]
+CMD ["bun", ".next/standalone/server.js"]
 ```
 
 ```bash
