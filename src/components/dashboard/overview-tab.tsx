@@ -193,7 +193,7 @@ export function OverviewTab() {
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Топ-5 преподавателей по нагрузке</CardTitle>
+            <CardTitle className="text-base">Топ-10 преподавателей по нагрузке</CardTitle>
             <CardDescription>Эффективные часы с учётом одновременных занятий</CardDescription>
           </CardHeader>
           <CardContent>
@@ -205,14 +205,14 @@ export function OverviewTab() {
                 { key: 'scheduledHours', label: 'Запланировано, ч', color: CHART_COLORS.primary },
               ]}
               yFormatter={(v) => `${v} ч`}
-              height={280}
+              height={420}
             />
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Топ-5 аудиторий по загрузке</CardTitle>
+            <CardTitle className="text-base">Топ-10 аудиторий по загрузке</CardTitle>
             <CardDescription>Уникальные лекции (дедуплицировано)</CardDescription>
           </CardHeader>
           <CardContent>
@@ -221,7 +221,7 @@ export function OverviewTab() {
               xKey="name"
               series={[{ key: 'hours', label: 'Часы', color: CHART_COLORS.accent }]}
               yFormatter={(v) => `${v} ч`}
-              height={280}
+              height={420}
             />
           </CardContent>
         </Card>
@@ -247,7 +247,7 @@ export function OverviewTab() {
           <CardHeader>
             <CardTitle className="text-base">Быстрый доступ — преподаватели</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-2 max-h-[640px] overflow-y-auto custom-scrollbar">
             {data.topTeachers.map((t: { id: number; name: string; longName: string; effectiveHours: number; events: number; simultaneousGroups: number }) => (
               <button
                 key={t.id}
@@ -279,7 +279,7 @@ export function OverviewTab() {
           <CardHeader>
             <CardTitle className="text-base">Быстрый доступ — аудитории</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-2 max-h-[640px] overflow-y-auto custom-scrollbar">
             {data.topRooms.map((r: { id: number; name: string; events: number; uniqueLectures: number; hours: number; conflicts: number }) => (
               <button
                 key={r.id}

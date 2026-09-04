@@ -19,7 +19,7 @@ export const dynamic = 'force-dynamic'
  *
  *   - KPI totals are computed via SQL aggregation in `computeOverviewKpis`,
  *     so we never load the full per-teacher workloads just to sum minutes.
- *   - Top-5 teachers and top-5 rooms still require per-teacher / per-room
+ *   - Top-10 teachers and top-10 rooms still require per-teacher / per-room
  *     workload computation, but we only fetch educators/rooms that have
  *     events in the active filter period (not the entire roster).
  *   - `filterOptions.educators` and `filterOptions.rooms` are NOT returned
@@ -41,16 +41,16 @@ export async function GET(request: Request) {
 
   // Run KPIs, kind aggregation, timeline, and top-N in parallel.
   // For top-N we compute all workloads (limited to teachers/rooms with
-  // events in the filter range) and slice to top 5.
+  // events in the filter range) and slice to top 10.
   const [kpis, kindAgg, timeline, teachers, rooms] = await Promise.all([
     computeOverviewKpis(where),
     db.scheduleEvent.groupBy({ by: ['kindCode'], where, _count: { _all: true } }),
     computeTimeline(where, 'week'),
     computeTeacherWorkloads(where).then((ws) =>
-      ws.sort((a, b) => b.effectiveMinutes - a.effectiveMinutes).slice(0, 5),
+      ws.sort((a, b) => b.effectiveMinutes - a.effectiveMinutes).slice(0, 10),
     ),
     computeRoomWorkloads(where).then((ws) =>
-      ws.sort((a, b) => b.totalMinutes - a.totalMinutes).slice(0, 5),
+      ws.sort((a, b) => b.totalMinutes - a.totalMinutes).slice(0, 10),
     ),
   ])
 
