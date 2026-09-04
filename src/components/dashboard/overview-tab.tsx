@@ -48,6 +48,21 @@ export function OverviewTab() {
     color: SEQUENCE[i % SEQUENCE.length],
   }))
 
+  // Stacked-by-month data: each row is { month, [kindLabel]: count }.
+  // The API returns byMonthByKind as a flat array of { month, [label]: count }
+  // — it's already shaped for direct use in a stacked BarChartCard.
+  const byMonthByKindData = (data.byMonthByKind ?? []) as Array<Record<string, number | string>>
+
+  // Series for the stacked-by-month chart: one bar per kind, stacked.
+  // Colors match the pie chart (uses SEQUENCE in declaration order).
+  const byMonthSeries = data.byKind.map(
+    (k: { label: string }, i: number) => ({
+      key: k.label,
+      label: k.label,
+      color: SEQUENCE[i % SEQUENCE.length],
+    }),
+  )
+
   const topTeachersData = data.topTeachers.map((t: { id: number; name: string; effectiveHours: number; scheduledHours: number }) => ({
     name: t.name,
     effectiveHours: t.effectiveHours,
@@ -188,6 +203,29 @@ export function OverviewTab() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Distribution by month — comparison across types */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Распределение по месяцам по типам занятий</CardTitle>
+          <CardDescription>
+            Количество событий в каждом месяце, разложенное по типам. Видно,
+            когда проходят регулярные занятия (по всему семестру) и когда
+            наступает сессия (пик в мае–июне). Столбцы наложены (stacked) —
+            высота итогового столбца равна общему числу событий в месяце.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <BarChartCard
+            data={byMonthByKindData}
+            xKey="month"
+            series={byMonthSeries}
+            yFormatter={(v) => formatNumber(v)}
+            height={320}
+            stacked
+          />
+        </CardContent>
+      </Card>
 
       {/* Rankings */}
       <div className="grid gap-6 lg:grid-cols-2">

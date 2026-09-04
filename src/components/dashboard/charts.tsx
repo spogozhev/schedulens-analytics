@@ -136,6 +136,8 @@ interface BarChartCardProps {
   height?: number
   horizontal?: boolean
   yWidth?: number
+  /** When true, bars are stacked on top of each other (one bar per series). */
+  stacked?: boolean
 }
 
 export function BarChartCard({
@@ -146,6 +148,7 @@ export function BarChartCard({
   height = 280,
   horizontal = false,
   yWidth = 48,
+  stacked = false,
 }: BarChartCardProps) {
   const config: ChartConfig = {}
   for (const s of series) {
@@ -206,6 +209,7 @@ export function BarChartCard({
             fill={s.color ?? SEQUENCE[i % SEQUENCE.length]}
             radius={horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0]}
             maxBarSize={horizontal ? 22 : 60}
+            stackId={stacked ? 'stack' : undefined}
           />
         ))}
       </BarChart>
