@@ -222,6 +222,7 @@ export function OverviewTab() {
             yFormatter={(v) => formatNumber(v)}
             height={320}
             stacked
+            rotateX={false}
           />
         </CardContent>
       </Card>

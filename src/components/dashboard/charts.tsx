@@ -138,6 +138,10 @@ interface BarChartCardProps {
   yWidth?: number
   /** When true, bars are stacked on top of each other (one bar per series). */
   stacked?: boolean
+  /** When true (default), X-axis labels are rotated -20° for long names.
+   *  Set to false for short labels (e.g. month abbreviations) so they render
+   *  horizontally and are easier to read. */
+  rotateX?: boolean
 }
 
 export function BarChartCard({
@@ -149,11 +153,57 @@ export function BarChartCard({
   horizontal = false,
   yWidth = 48,
   stacked = false,
+  rotateX = true,
 }: BarChartCardProps) {
   const config: ChartConfig = {}
   for (const s of series) {
     config[s.key] = { label: s.label, color: s.color ?? CHART_COLORS.primary }
   }
+  // Build the axis elements as variables — NOT wrapped in React fragments.
+  // Recharts iterates its children with `React.Children` and does not
+  // always descend into fragments, which caused axes to silently not
+  // render (the #1 reason this chart showed no labels before this fix).
+  const xAxisEl = horizontal ? (
+    <XAxis
+      type="number"
+      tickLine={false}
+      axisLine={false}
+      fontSize={11}
+      tickFormatter={(v) => (yFormatter ? yFormatter(v as number) : String(v))}
+    />
+  ) : (
+    <XAxis
+      dataKey={xKey}
+      tickLine
+      axisLine
+      tickMargin={8}
+      fontSize={11}
+      interval={0}
+      angle={rotateX ? -20 : 0}
+      textAnchor={rotateX ? 'end' : 'middle'}
+      height={rotateX ? 50 : 30}
+    />
+  )
+  const yAxisEl = horizontal ? (
+    <YAxis
+      type="category"
+      dataKey={xKey}
+      tickLine={false}
+      axisLine={false}
+      width={yWidth}
+      fontSize={10}
+      interval={0}
+    />
+  ) : (
+    <YAxis
+      tickLine={false}
+      axisLine={false}
+      tickMargin={8}
+      fontSize={11}
+      tickFormatter={(v) => (yFormatter ? yFormatter(v as number) : String(v))}
+      width={yWidth}
+    />
+  )
   return (
     <ChartContainer config={config} style={{ height }} className="w-full">
       <BarChart
@@ -167,38 +217,8 @@ export function BarChartCard({
           horizontal={!horizontal}
           className="stroke-muted/40"
         />
-        {horizontal ? (
-          <>
-            <XAxis
-              type="number"
-              tickLine={false}
-              axisLine={false}
-              fontSize={11}
-              tickFormatter={(v) => (yFormatter ? yFormatter(v as number) : String(v))}
-            />
-            <YAxis
-              type="category"
-              dataKey={xKey}
-              tickLine={false}
-              axisLine={false}
-              width={yWidth}
-              fontSize={10}
-              interval={0}
-            />
-          </>
-        ) : (
-          <>
-            <XAxis dataKey={xKey} tickLine={false} axisLine={false} tickMargin={8} fontSize={11} interval={0} angle={-20} textAnchor="end" height={50} />
-            <YAxis
-              tickLine={false}
-              axisLine={false}
-              tickMargin={8}
-              fontSize={11}
-              tickFormatter={(v) => (yFormatter ? yFormatter(v as number) : String(v))}
-              width={yWidth}
-            />
-          </>
-        )}
+        {xAxisEl}
+        {yAxisEl}
         <ChartTooltip content={<ChartTooltipContent />} />
         {series.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
         {series.map((s, i) => (
