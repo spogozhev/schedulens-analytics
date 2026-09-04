@@ -35,6 +35,25 @@
  *     calls and the nested `coEducators: { create: [...] }` inside each
  *     `db.scheduleEvent.create()`.
  *
+ * Incremental imports (no DB cleanup):
+ *  The script does NOT clear the database before importing. Existing
+ *  records are preserved, and new files are merged into the dataset.
+ *  Duplicates are detected via the `findFirst` check on the composite key
+ *  (educatorId, startDateTime, subjectId, globalEventHash) before each
+ *  `create()`. To keep incremental imports fast, the script pre-populates
+ *  the entity caches from the existing DB (`preloadCaches`) so known
+ *  subjects/locations/groups/educators are not re-upserted.
+ *
+ *  Typical workflow:
+ *    - First run: import 1000 JSON files → DB has 1000 teachers' schedules.
+ *    - A week later: drop 50 NEW JSON files into the same folder, re-run
+ *      the importer → 50 new teachers are added; the 1000 existing
+ *      teachers' events are skipped (via findFirst); no duplicate rows.
+ *    - If a teacher's file is updated (e.g. schedule changes), the importer
+ *      still skips the existing events (matched by globalEventHash). To
+ *      force a re-import of changed events, use `bun run db:push
+ *      --force-reset` to clear the DB first, then re-run the importer.
+ *
  * Usage:  bun run scripts/import-schedules.ts [directory]
  *   default directory = ./upload
  */
@@ -121,6 +140,41 @@ function newCaches(): EntityCaches {
     group: new Map(),
     educator: new Set(),
   };
+}
+
+/**
+ * Pre-populate the entity caches from the existing DB so that the importer
+ * skips already-known subjects/locations/groups/educators instead of
+ * re-issuing upserts for them. This is important for incremental imports
+ * (where the database is NOT cleared) — without this, the second and
+ * subsequent runs would re-execute thousands of no-op upserts.
+ *
+ * We read all rows of Subject, Location, Group, and Educator in a single
+ * `findMany` each — for a 5000-teacher university this is ~5500 + ~1000 +
+ * ~200 + ~5000 rows, all loaded into memory Maps. This takes <1s and saves
+ * many seconds of redundant upsert queries during import.
+ */
+async function preloadCaches(caches: EntityCaches): Promise<void> {
+  const t0 = Date.now();
+  console.log('Pre-populating entity caches from existing DB…');
+
+  const [subjects, locations, groups, educators] = await Promise.all([
+    db.subject.findMany({ select: { id: true, name: true } }),
+    db.location.findMany({ select: { id: true, displayName: true, latitude: true, longitude: true } }),
+    db.group.findMany({ select: { id: true, name: true } }),
+    db.educator.findMany({ select: { id: true } }),
+  ]);
+
+  for (const s of subjects) caches.subject.set(s.name, s.id);
+  for (const l of locations) {
+    caches.location.set(l.displayName, { id: l.id, latitude: l.latitude, longitude: l.longitude });
+  }
+  for (const g of groups) caches.group.set(g.name, g.id);
+  for (const e of educators) caches.educator.add(e.id);
+
+  console.log(
+    `  Loaded ${subjects.length} subjects, ${locations.length} locations, ${groups.length} groups, ${educators.length} educators in ${((Date.now() - t0) / 1000).toFixed(2)}s.`,
+  );
 }
 
 // ---------- Date parsing helpers ----------
@@ -262,12 +316,17 @@ async function setupPragmas(): Promise<void> {
   // NOTE: Some PRAGMAs (notably `journal_mode = WAL`) return a row, so we use
   // `$queryRawUnsafe` for all of them (instead of `$executeRawUnsafe`, which
   // fails with "Execute returned results, which is not allowed in SQLite").
+  //
+  // We deliberately DO NOT set `locking_mode = EXCLUSIVE` because it can
+  // leave a stale WAL lock if the script is re-run while the DB is in WAL
+  // mode (the second run blocks until socket timeout). The default
+  // `locking_mode = NORMAL` is fine — WAL mode + NORMAL synchronous is
+  // already 5-10× faster than the default rollback-journal mode.
   await db.$queryRawUnsafe('PRAGMA journal_mode = WAL');
   await db.$queryRawUnsafe('PRAGMA synchronous = NORMAL');
   await db.$queryRawUnsafe('PRAGMA cache_size = -134217728'); // 128 MB
   await db.$queryRawUnsafe('PRAGMA temp_store = MEMORY');
   await db.$queryRawUnsafe('PRAGMA mmap_size = 268435456'); // 256 MB
-  await db.$queryRawUnsafe('PRAGMA locking_mode = EXCLUSIVE');
 }
 
 // ---------- Cached entity helpers ----------
@@ -554,24 +613,28 @@ async function main() {
   console.log('Setting SQLite PRAGMAs…');
   await setupPragmas();
 
-  // Step 2: Clear existing data (outside transaction — if import fails,
-  // we want a clean DB to re-run, not the old data restored).
-  console.log('Clearing existing schedule data…');
-  await db.scheduleEventLocation.deleteMany({});
-  await db.scheduleEventGroup.deleteMany({});
-  await db.scheduleEvent.deleteMany({});
-  await db.location.deleteMany({});
-  await db.subject.deleteMany({});
-  await db.group.deleteMany({});
-  await db.educator.deleteMany({});
-
-  // Step 3: Walk files
+  // Step 2: Walk files
   const files: string[] = [];
   await walkDir(dir, files);
   console.log(`Found ${files.length} JSON file(s).`);
 
-  // Step 4: Import all files in a single transaction
+  // Step 3: Import all files in a single transaction.
+  //
+  // NOTE: This script does NOT clear the database — existing records are
+  // preserved. Duplicates are skipped via the `findFirst` check on the
+  // composite key (educatorId, startDateTime, subjectId, globalEventHash)
+  // before each `create()`. Running the importer repeatedly (e.g. once a
+  // week when new schedule files become available) will simply add the new
+  // events to the existing dataset without touching the previously
+  // imported ones.
+  //
+  // Before importing, we pre-populate the entity caches from the existing
+  // DB so upserts for already-known subjects/locations/groups/educators
+  // are skipped entirely — this keeps incremental imports fast (otherwise
+  // every run would re-issue thousands of no-op upserts for already-known
+  // entities).
   const caches = newCaches();
+  await preloadCaches(caches);
   const tImportStart = Date.now();
   let totalEvents = 0;
   let totalSkipped = 0;

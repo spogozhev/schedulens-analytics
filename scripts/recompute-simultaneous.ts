@@ -20,12 +20,14 @@ import { db } from '../src/lib/db'
 import type { Prisma } from '@prisma/client'
 
 async function setupPragmas(): Promise<void> {
+  // See import-schedules.ts for rationale. We deliberately DO NOT set
+  // `locking_mode = EXCLUSIVE` because it can leave a stale WAL lock on
+  // re-runs (the second invocation blocks until socket timeout).
   await db.$queryRawUnsafe('PRAGMA journal_mode = WAL')
   await db.$queryRawUnsafe('PRAGMA synchronous = NORMAL')
   await db.$queryRawUnsafe('PRAGMA cache_size = -134217728')
   await db.$queryRawUnsafe('PRAGMA temp_store = MEMORY')
   await db.$queryRawUnsafe('PRAGMA mmap_size = 268435456')
-  await db.$queryRawUnsafe('PRAGMA locking_mode = EXCLUSIVE')
 }
 
 async function computeSimultaneousGroups(
