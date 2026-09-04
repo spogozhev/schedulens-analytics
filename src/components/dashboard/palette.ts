@@ -46,16 +46,18 @@ export const KIND_LABELS: Record<number, string> = {
 // stacked bar chart "Распределение по месяцам по типам занятий" so both
 // charts stay visually consistent.
 //
-// The three colors are intentionally chosen to be highly distinguishable:
-//   - Индивидуальные мероприятия (0): blue  — distinct from green and amber
-//   - Регулярные занятия (1):       green — primary bulk of the schedule
-//   - Сессия / консультации (2):     amber — warm tone, contrasts with blue
+// The three colors are chosen for high distinguishability while staying
+// within the project's warm palette (no indigo/blue):
+//   - Индивидуальные мероприятия (0): orange  (#ea580c) — same as
+//     CHART_COLORS.primary, also used by the top-10 teachers chart
+//   - Регулярные занятия (1):       green   (#16a34a) — primary bulk of the schedule
+//   - Сессия / консультации (2):     amber   (#d97706) — warmer/longer wavelength
 //
-// (The project default palette avoids indigo/blue, but the user explicitly
-// requested a blue shade for Индивидуальные мероприятия to distinguish it
-// from the warm amber of Сессия / консультации.)
+// The three colors form a triad in the warm green-orange range:
+// green-600 (#16a34a), orange-600 (#ea580c), amber-600 (#d97706) — visually
+// distinct yet harmonious.
 export const KIND_COLORS: Record<number, string> = {
-  0: '#2563eb', // blue-600 — Индивидуальные мероприятия
+  0: '#ea580c', // orange-600 (rgb 234, 88, 12) — Индивидуальные мероприятия
   1: '#16a34a', // green-600 — Регулярные занятия
   2: '#d97706', // amber-600 — Сессия / консультации
 }
