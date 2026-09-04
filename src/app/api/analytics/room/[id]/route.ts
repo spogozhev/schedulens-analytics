@@ -93,6 +93,8 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   const eventsCount = room.events.length
 
   // Conflicts: overlapping intervals, different hashes.
+  // NOTE: back-to-back lectures (a.end === b.start) are NOT a conflict —
+  // we use `>=` so that b.start === a.end triggers the break.
   const sortedForConflict = [...lectures].sort((a, b) => a.start.getTime() - b.start.getTime())
   let conflicts = 0
   for (let i = 0; i < sortedForConflict.length; i++) {

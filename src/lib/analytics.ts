@@ -392,6 +392,10 @@ export async function computeRoomWorkloads(
       }
     }
     // Detect conflicts: same room, overlapping intervals, DIFFERENT lectureHash.
+    // NOTE: intervals that merely touch at a boundary (b.start === a.end, e.g.
+    // 13:00–14:00 then 14:00–15:00) are NOT a conflict — those are back-to-back
+    // classes. We use `>=` so that b.start === a.end triggers the break and no
+    // conflict is recorded.
     lectures.sort((a, b) => a.start - b.start)
     let conflicts = 0
     for (let i = 0; i < lectures.length; i++) {

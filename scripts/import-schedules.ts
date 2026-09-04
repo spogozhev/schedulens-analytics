@@ -428,13 +428,19 @@ async function computeSimultaneousGroups(): Promise<{ teachers: number; groups: 
     if (events.length === 0) continue;
 
     // Sweep-line: group overlapping (chained) intervals.
+    // IMPORTANT: Two intervals that merely touch at a boundary
+    // (a.end === b.start, e.g. 13:00–14:00 then 14:00–15:00) are NOT
+    // simultaneous — they are back-to-back classes. Only strictly overlapping
+    // intervals (b.start < a.maxEnd) are merged into the same group.
+    // Using `<=` here would incorrectly merge back-to-back classes as
+    // "simultaneous" and inflate the simultaneous-groups count.
     type G = { ids: string[]; maxEnd: number; minStart: number };
     const groups: G[] = [];
     let cur: G | null = null;
     for (const ev of events) {
       const s = ev.startDateTime.getTime();
       const e = ev.endDateTime.getTime();
-      if (cur && s <= cur.maxEnd) {
+      if (cur && s < cur.maxEnd) {
         cur.ids.push(ev.id);
         cur.maxEnd = Math.max(cur.maxEnd, e);
         cur.minStart = Math.min(cur.minStart, s);
