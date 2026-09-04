@@ -1,5 +1,10 @@
 import { NextResponse } from 'next/server'
-import { buildEventWhere, computeRoomWorkloads, type CommonFilters } from '@/lib/analytics'
+import {
+  buildEventWhere,
+  computeRoomWorkloadsPaginated,
+  type CommonFilters,
+  type RoomSortKey,
+} from '@/lib/analytics'
 
 export const dynamic = 'force-dynamic'
 
@@ -13,32 +18,21 @@ export async function GET(request: Request) {
   }
   const where = buildEventWhere(filters)
 
-  const rooms = await computeRoomWorkloads(where)
+  const sort = (url.searchParams.get('sort') as RoomSortKey) || 'hours'
+  const search = url.searchParams.get('search') || ''
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10))
+  const pageSize = Math.max(1, Math.min(500, parseInt(url.searchParams.get('pageSize') || '50', 10)))
 
-  const sort = url.searchParams.get('sort') || 'hours'
-  const topN = parseInt(url.searchParams.get('top') || '50', 10)
-
-  const sorted = [...rooms].sort((a, b) => {
-    switch (sort) {
-      case 'events':
-        return b.eventsCount - a.eventsCount
-      case 'uniqueLectures':
-        return b.uniqueLectures - a.uniqueLectures
-      case 'conflicts':
-        return b.conflicts - a.conflicts
-      case 'name':
-        return a.displayName.localeCompare(b.displayName, 'ru')
-      case 'hours':
-      default:
-        return b.totalMinutes - a.totalMinutes
-    }
-  })
-
-  const limited = topN > 0 ? sorted.slice(0, topN) : sorted
+  const result = await computeRoomWorkloadsPaginated(where, { sort, page, pageSize, search })
 
   return NextResponse.json({
     sort,
-    items: limited.map((r) => ({
+    search,
+    page: result.page,
+    pageSize: result.pageSize,
+    total: result.total,
+    totalPages: result.totalPages,
+    items: result.items.map((r) => ({
       id: r.id,
       name: r.displayName,
       eventsCount: r.eventsCount,

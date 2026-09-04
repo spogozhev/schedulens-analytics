@@ -21,21 +21,44 @@ export function useOverview(filters: string) {
   return useQuery({
     queryKey: ['overview', filters],
     queryFn: () => fetchJson(buildUrl('overview', filters)),
-    // Always refetch when filters change
   })
 }
 
-export function useTeachers(filters: string, sort: string, top: number) {
+export interface PaginationParams {
+  page: number
+  pageSize: number
+  sort: string
+  search: string
+}
+
+export function useTeachers(filters: string, params: PaginationParams) {
+  const query = new URLSearchParams({
+    ...(filters ? Object.fromEntries(new URLSearchParams(filters)) : {}),
+    sort: params.sort,
+    page: String(params.page),
+    pageSize: String(params.pageSize),
+    search: params.search,
+  }).toString()
   return useQuery({
-    queryKey: ['teachers', filters, sort, top],
-    queryFn: () => fetchJson(`${API_BASE}/teachers?${filters}&sort=${encodeURIComponent(sort)}&top=${top}`),
+    queryKey: ['teachers', filters, params],
+    queryFn: () => fetchJson(`${API_BASE}/teachers?${query}`),
+    // Keep previous page's data while loading the next page (smoother UX).
+    placeholderData: (prev) => prev,
   })
 }
 
-export function useRooms(filters: string, sort: string, top: number) {
+export function useRooms(filters: string, params: PaginationParams) {
+  const query = new URLSearchParams({
+    ...(filters ? Object.fromEntries(new URLSearchParams(filters)) : {}),
+    sort: params.sort,
+    page: String(params.page),
+    pageSize: String(params.pageSize),
+    search: params.search,
+  }).toString()
   return useQuery({
-    queryKey: ['rooms', filters, sort, top],
-    queryFn: () => fetchJson(`${API_BASE}/rooms?${filters}&sort=${encodeURIComponent(sort)}&top=${top}`),
+    queryKey: ['rooms', filters, params],
+    queryFn: () => fetchJson(`${API_BASE}/rooms?${query}`),
+    placeholderData: (prev) => prev,
   })
 }
 

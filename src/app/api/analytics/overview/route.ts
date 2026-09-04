@@ -5,6 +5,7 @@ import {
   computeTeacherWorkloads,
   computeRoomWorkloads,
   computeTimeline,
+  computeOverviewKpis,
   getDateBounds,
   KIND_LABELS,
   type CommonFilters,
@@ -12,6 +13,20 @@ import {
 
 export const dynamic = 'force-dynamic'
 
+/**
+ * Overview endpoint. Optimized for universities with 5000+ teachers and
+ * 1000+ rooms:
+ *
+ *   - KPI totals are computed via SQL aggregation in `computeOverviewKpis`,
+ *     so we never load the full per-teacher workloads just to sum minutes.
+ *   - Top-5 teachers and top-5 rooms still require per-teacher / per-room
+ *     workload computation, but we only fetch educators/rooms that have
+ *     events in the active filter period (not the entire roster).
+ *   - `filterOptions.educators` and `filterOptions.rooms` are NOT returned
+ *     here — the client should use the dedicated paginated endpoints with
+ *     server-side search instead. Only `filterOptions.kinds` (3 fixed
+ *     options) is returned.
+ */
 export async function GET(request: Request) {
   const url = new URL(request.url)
   const filters: CommonFilters = {
@@ -24,37 +39,20 @@ export async function GET(request: Request) {
 
   const bounds = await getDateBounds()
 
-  const [teachers, rooms, kindAgg, eventsCount, simAgg, inferredAgg, timeline, allEducators, allRooms] =
-    await Promise.all([
-      computeTeacherWorkloads(where),
-      computeRoomWorkloads(where),
-      db.scheduleEvent.groupBy({ by: ['kindCode'], where, _count: { _all: true } }),
-      db.scheduleEvent.count({ where }),
-      db.scheduleEvent.count({ where: { ...where, simultaneousGroupId: { not: null } } }),
-      db.scheduleEvent.count({ where: { ...where, hasInferredEnd: true } }),
-      computeTimeline(where, 'week'),
-      db.educator.findMany({
-        where: { id: { gt: 0 } },
-        select: { id: true, displayName: true, longName: true },
-        orderBy: { displayName: 'asc' },
-      }),
-      db.location.findMany({ select: { id: true, displayName: true }, orderBy: { displayName: 'asc' } }),
-    ])
-
-  // KPIs
-  const totalScheduledMinutes = teachers.reduce((s, t) => s + t.scheduledMinutes, 0)
-  const totalEffectiveMinutes = teachers.reduce((s, t) => s + t.effectiveMinutes, 0)
-  const totalSimultaneousEvents = simAgg
-  const simGroupIds = new Set<string>()
-  const simEvents = await db.scheduleEvent.findMany({
-    where: { ...where, simultaneousGroupId: { not: null } },
-    select: { simultaneousGroupId: true },
-    distinct: ['simultaneousGroupId'],
-  })
-  for (const e of simEvents) if (e.simultaneousGroupId) simGroupIds.add(e.simultaneousGroupId)
-
-  const teachersRanked = [...teachers].sort((a, b) => b.effectiveMinutes - a.effectiveMinutes).slice(0, 5)
-  const roomsRanked = [...rooms].sort((a, b) => b.totalMinutes - a.totalMinutes).slice(0, 5)
+  // Run KPIs, kind aggregation, timeline, and top-N in parallel.
+  // For top-N we compute all workloads (limited to teachers/rooms with
+  // events in the filter range) and slice to top 5.
+  const [kpis, kindAgg, timeline, teachers, rooms] = await Promise.all([
+    computeOverviewKpis(where),
+    db.scheduleEvent.groupBy({ by: ['kindCode'], where, _count: { _all: true } }),
+    computeTimeline(where, 'week'),
+    computeTeacherWorkloads(where).then((ws) =>
+      ws.sort((a, b) => b.effectiveMinutes - a.effectiveMinutes).slice(0, 5),
+    ),
+    computeRoomWorkloads(where).then((ws) =>
+      ws.sort((a, b) => b.totalMinutes - a.totalMinutes).slice(0, 5),
+    ),
+  ])
 
   const byKind = kindAgg.map((k) => ({
     kindCode: k.kindCode,
@@ -67,21 +65,21 @@ export async function GET(request: Request) {
       ? { from: bounds.from.toISOString(), to: bounds.to.toISOString() }
       : null,
     kpis: {
-      teachers: teachers.filter((t) => t.eventsCount > 0).length,
-      events: eventsCount,
-      rooms: rooms.filter((r) => r.eventsCount > 0).length,
-      subjects: await db.subject.count(),
-      groups: await db.group.count(),
-      scheduledHours: Math.round((totalScheduledMinutes / 60) * 10) / 10,
-      effectiveHours: Math.round((totalEffectiveMinutes / 60) * 10) / 10,
-      simultaneousEvents: totalSimultaneousEvents,
-      simultaneousGroups: simGroupIds.size,
-      inferredEndEvents: inferredAgg,
-      timeSavedHours: Math.round(((totalScheduledMinutes - totalEffectiveMinutes) / 60) * 10) / 10,
+      teachers: kpis.teachersCount,
+      events: kpis.eventsCount,
+      rooms: kpis.roomsCount,
+      subjects: kpis.subjectsCount,
+      groups: kpis.groupsCount,
+      scheduledHours: Math.round((kpis.scheduledMinutes / 60) * 10) / 10,
+      effectiveHours: Math.round((kpis.effectiveMinutes / 60) * 10) / 10,
+      simultaneousEvents: kpis.simultaneousEvents,
+      simultaneousGroups: kpis.simultaneousGroups,
+      inferredEndEvents: kpis.inferredEndEvents,
+      timeSavedHours: Math.round(((kpis.scheduledMinutes - kpis.effectiveMinutes) / 60) * 10) / 10,
     },
     byKind,
     timeline,
-    topTeachers: teachersRanked.map((t) => ({
+    topTeachers: teachers.map((t) => ({
       id: t.id,
       name: t.displayName,
       longName: t.longName,
@@ -90,7 +88,7 @@ export async function GET(request: Request) {
       effectiveHours: Math.round((t.effectiveMinutes / 60) * 10) / 10,
       simultaneousGroups: t.simultaneousGroups,
     })),
-    topRooms: roomsRanked.map((r) => ({
+    topRooms: rooms.map((r) => ({
       id: r.id,
       name: r.displayName,
       events: r.eventsCount,
@@ -98,9 +96,9 @@ export async function GET(request: Request) {
       hours: Math.round((r.totalMinutes / 60) * 10) / 10,
       conflicts: r.conflicts,
     })),
+    // Only kinds are returned — educator/room filter options are now
+    // fetched via the dedicated paginated endpoints with server-side search.
     filterOptions: {
-      educators: allEducators.map((e) => ({ id: e.id, name: e.displayName, longName: e.longName })),
-      rooms: allRooms.map((r) => ({ id: r.id, name: r.displayName })),
       kinds: Object.entries(KIND_LABELS).map(([code, label]) => ({ kindCode: Number(code), label })),
     },
   })

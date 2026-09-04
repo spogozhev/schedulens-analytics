@@ -1,5 +1,10 @@
 import { NextResponse } from 'next/server'
-import { buildEventWhere, computeTeacherWorkloads, type CommonFilters } from '@/lib/analytics'
+import {
+  buildEventWhere,
+  computeTeacherWorkloadsPaginated,
+  type CommonFilters,
+  type TeacherSortKey,
+} from '@/lib/analytics'
 
 export const dynamic = 'force-dynamic'
 
@@ -13,34 +18,21 @@ export async function GET(request: Request) {
   }
   const where = buildEventWhere(filters)
 
-  const teachers = await computeTeacherWorkloads(where)
+  const sort = (url.searchParams.get('sort') as TeacherSortKey) || 'effectiveHours'
+  const search = url.searchParams.get('search') || ''
+  const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10))
+  const pageSize = Math.max(1, Math.min(500, parseInt(url.searchParams.get('pageSize') || '50', 10)))
 
-  const sort = url.searchParams.get('sort') || 'effectiveHours'
-  const topN = parseInt(url.searchParams.get('top') || '50', 10)
-
-  const sorted = [...teachers].sort((a, b) => {
-    switch (sort) {
-      case 'scheduledHours':
-        return b.scheduledMinutes - a.scheduledMinutes
-      case 'eventsCount':
-        return b.eventsCount - a.eventsCount
-      case 'simultaneousGroups':
-        return b.simultaneousGroups - a.simultaneousGroups
-      case 'simultaneousEvents':
-        return b.simultaneousEvents - a.simultaneousEvents
-      case 'name':
-        return a.displayName.localeCompare(b.displayName, 'ru')
-      case 'effectiveHours':
-      default:
-        return b.effectiveMinutes - a.effectiveMinutes
-    }
-  })
-
-  const limited = topN > 0 ? sorted.slice(0, topN) : sorted
+  const result = await computeTeacherWorkloadsPaginated(where, { sort, page, pageSize, search })
 
   return NextResponse.json({
     sort,
-    items: limited.map((t) => ({
+    search,
+    page: result.page,
+    pageSize: result.pageSize,
+    total: result.total,
+    totalPages: result.totalPages,
+    items: result.items.map((t) => ({
       id: t.id,
       name: t.displayName,
       longName: t.longName,

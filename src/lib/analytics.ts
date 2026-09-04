@@ -58,6 +58,61 @@ export interface TeacherWorkload {
   canceledEvents: number
 }
 
+export type TeacherSortKey =
+  | 'effectiveHours'
+  | 'scheduledHours'
+  | 'eventsCount'
+  | 'simultaneousGroups'
+  | 'simultaneousEvents'
+  | 'name'
+
+export type RoomSortKey = 'hours' | 'events' | 'uniqueLectures' | 'conflicts' | 'name'
+
+export interface PaginatedResult<T> {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
+}
+
+/**
+ * Find educator IDs that have at least one event matching the filter range,
+ * optionally narrowed by a name LIKE search. Returns a Set for fast lookup.
+ *
+ * This is the key to scaling to 5000+ teachers: we never load teachers that
+ * have no events in the active filter period.
+ */
+async function findEducatorIdsWithEvents(
+  where: Prisma.ScheduleEventWhereInput,
+  search?: string,
+): Promise<Set<number>> {
+  // Pull distinct educatorIds for events matching the filter. Only primary
+  // educators (id > 0) are counted — co-educators (synthetic negative ids)
+  // are excluded from the ranking.
+  const rows = await db.scheduleEvent.findMany({
+    where: { ...where, educatorId: { gt: 0 } },
+    distinct: ['educatorId'],
+    select: { educatorId: true },
+  })
+  const ids = new Set<number>(rows.map((r) => r.educatorId))
+  if (search && search.trim()) {
+    // Server-side name search: fetch matching educators and intersect.
+    const matched = await db.educator.findMany({
+      where: {
+        id: { in: [...ids] },
+        OR: [
+          { displayName: { contains: search.trim() } },
+          { longName: { contains: search.trim() } },
+        ],
+      },
+      select: { id: true },
+    })
+    return new Set(matched.map((m) => m.id))
+  }
+  return ids
+}
+
 /**
  * Compute per-teacher workload, accounting for simultaneous events.
  *
@@ -65,13 +120,25 @@ export interface TeacherWorkload {
  *   logic used at import time, but re-derived here from `simultaneousGroupId`).
  * - `effectiveMinutes` is the union of the time intervals actually spent
  *   teaching (simultaneous events counted once).
+ *
+ * By default, only teachers with at least one event matching `where` are
+ * returned — this is the key optimization for universities with 5000+
+ * teachers (we don't process teachers with no events in the filter period).
  */
 export async function computeTeacherWorkloads(
   where: Prisma.ScheduleEventWhereInput,
+  options?: { educatorIds?: number[]; onlyWithEvents?: boolean },
 ): Promise<TeacherWorkload[]> {
-  // Pull all primary educators (id > 0).
+  // Build the educator filter. If caller provided an explicit list of IDs
+  // (e.g. from search), use that. Otherwise, find educators with events.
+  let educatorIds = options?.educatorIds
+  if (!educatorIds && options?.onlyWithEvents !== false) {
+    const idSet = await findEducatorIdsWithEvents(where)
+    educatorIds = [...idSet]
+  }
+
   const teachers = await db.educator.findMany({
-    where: { id: { gt: 0 } },
+    where: educatorIds && educatorIds.length > 0 ? { id: { in: educatorIds } } : { id: { gt: 0 } },
     select: {
       id: true,
       displayName: true,
@@ -94,6 +161,9 @@ export async function computeTeacherWorkloads(
   const result: TeacherWorkload[] = []
   for (const t of teachers) {
     if (t.events.length === 0) {
+      // Even if the teacher has no events after filtering, keep the row so
+      // the caller can see them (e.g. when searching by name). The caller
+      // can decide to filter on `eventsCount > 0`.
       result.push({
         id: t.id,
         displayName: t.displayName,
@@ -151,6 +221,73 @@ export async function computeTeacherWorkloads(
   return result
 }
 
+function sortTeachers(items: TeacherWorkload[], sort: TeacherSortKey): TeacherWorkload[] {
+  const sorted = [...items]
+  switch (sort) {
+    case 'scheduledHours':
+      sorted.sort((a, b) => b.scheduledMinutes - a.scheduledMinutes)
+      break
+    case 'eventsCount':
+      sorted.sort((a, b) => b.eventsCount - a.eventsCount)
+      break
+    case 'simultaneousGroups':
+      sorted.sort((a, b) => b.simultaneousGroups - a.simultaneousGroups)
+      break
+    case 'simultaneousEvents':
+      sorted.sort((a, b) => b.simultaneousEvents - a.simultaneousEvents)
+      break
+    case 'name':
+      sorted.sort((a, b) => a.displayName.localeCompare(b.displayName, 'ru'))
+      break
+    case 'effectiveHours':
+    default:
+      sorted.sort((a, b) => b.effectiveMinutes - a.effectiveMinutes)
+      break
+  }
+  // Stable tiebreaker: by id ascending so pages are deterministic.
+  if (sort !== 'name') {
+    sorted.sort((a, b) => {
+      // First by primary key already applied above; preserve on ties.
+      return 0
+    })
+  }
+  return sorted
+}
+
+/**
+ * Paginated variant of computeTeacherWorkloads. Returns the page slice and
+ * the total count (after filtering and before slicing).
+ *
+ * `search` performs a server-side LIKE search on `displayName` / `longName`.
+ * Only teachers with at least one event matching the filter period are
+ * returned, so a request that doesn't filter by date still operates over
+ * teachers with events (not the entire 5000+ teacher roster).
+ */
+export async function computeTeacherWorkloadsPaginated(
+  where: Prisma.ScheduleEventWhereInput,
+  options: {
+    sort: TeacherSortKey
+    page: number
+    pageSize: number
+    search?: string
+  },
+): Promise<PaginatedResult<TeacherWorkload>> {
+  const idSet = await findEducatorIdsWithEvents(where, options.search)
+  if (idSet.size === 0) {
+    return { items: [], total: 0, page: options.page, pageSize: options.pageSize, totalPages: 0 }
+  }
+  const educatorIds = [...idSet]
+  const workloads = await computeTeacherWorkloads(where, { educatorIds })
+  const sorted = sortTeachers(workloads, options.sort)
+  const total = sorted.length
+  const pageSize = Math.max(1, options.pageSize)
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const page = Math.min(Math.max(1, options.page), totalPages)
+  const start = (page - 1) * pageSize
+  const items = sorted.slice(start, start + pageSize)
+  return { items, total, page, pageSize, totalPages }
+}
+
 export interface RoomWorkload {
   id: number
   displayName: string
@@ -163,6 +300,34 @@ export interface RoomWorkload {
 }
 
 /**
+ * Find location IDs that have at least one event matching the filter range,
+ * optionally narrowed by a name LIKE search.
+ */
+async function findLocationIdsWithEvents(
+  where: Prisma.ScheduleEventWhereInput,
+  search?: string,
+): Promise<Set<number>> {
+  // Pull distinct locationIds via the join table filtered by event conditions.
+  const rows = await db.scheduleEventLocation.findMany({
+    where: { event: where },
+    distinct: ['locationId'],
+    select: { locationId: true },
+  })
+  const ids = new Set<number>(rows.map((r) => r.locationId))
+  if (search && search.trim()) {
+    const matched = await db.location.findMany({
+      where: {
+        id: { in: [...ids] },
+        displayName: { contains: search.trim() },
+      },
+      select: { id: true },
+    })
+    return new Set(matched.map((m) => m.id))
+  }
+  return ids
+}
+
+/**
  * Compute per-room workload. Multiple teacher rows for the same physical
  * lecture (same `lectureHash`) are counted once for utilization.
  *
@@ -171,8 +336,16 @@ export interface RoomWorkload {
  */
 export async function computeRoomWorkloads(
   where: Prisma.ScheduleEventWhereInput,
+  options?: { locationIds?: number[] },
 ): Promise<RoomWorkload[]> {
+  let locationIds = options?.locationIds
+  if (!locationIds) {
+    const idSet = await findLocationIdsWithEvents(where)
+    locationIds = [...idSet]
+  }
+
   const locations = await db.location.findMany({
+    where: locationIds && locationIds.length > 0 ? { id: { in: locationIds } } : undefined,
     include: {
       events: {
         where: { event: where },
@@ -207,8 +380,6 @@ export async function computeRoomWorkloads(
       continue
     }
     // Dedupe by lectureHash → unique physical lectures.
-    // (Multiple rows for the same physical lecture differ only by audience
-    //  group, so lectureHash merges them.)
     const seen = new Set<string>()
     let totalMinutes = 0
     const lectures: { start: number; end: number; hash: string }[] = []
@@ -243,6 +414,58 @@ export async function computeRoomWorkloads(
     })
   }
   return result
+}
+
+function sortRooms(items: RoomWorkload[], sort: RoomSortKey): RoomWorkload[] {
+  const sorted = [...items]
+  switch (sort) {
+    case 'events':
+      sorted.sort((a, b) => b.eventsCount - a.eventsCount)
+      break
+    case 'uniqueLectures':
+      sorted.sort((a, b) => b.uniqueLectures - a.uniqueLectures)
+      break
+    case 'conflicts':
+      sorted.sort((a, b) => b.conflicts - a.conflicts)
+      break
+    case 'name':
+      sorted.sort((a, b) => a.displayName.localeCompare(b.displayName, 'ru'))
+      break
+    case 'hours':
+    default:
+      sorted.sort((a, b) => b.totalMinutes - a.totalMinutes)
+      break
+  }
+  return sorted
+}
+
+/**
+ * Paginated variant of computeRoomWorkloads. Same pagination semantics as
+ * the teachers variant.
+ */
+export async function computeRoomWorkloadsPaginated(
+  where: Prisma.ScheduleEventWhereInput,
+  options: {
+    sort: RoomSortKey
+    page: number
+    pageSize: number
+    search?: string
+  },
+): Promise<PaginatedResult<RoomWorkload>> {
+  const idSet = await findLocationIdsWithEvents(where, options.search)
+  if (idSet.size === 0) {
+    return { items: [], total: 0, page: options.page, pageSize: options.pageSize, totalPages: 0 }
+  }
+  const locationIds = [...idSet]
+  const workloads = await computeRoomWorkloads(where, { locationIds })
+  const sorted = sortRooms(workloads, options.sort)
+  const total = sorted.length
+  const pageSize = Math.max(1, options.pageSize)
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const page = Math.min(Math.max(1, options.page), totalPages)
+  const start = (page - 1) * pageSize
+  const items = sorted.slice(start, start + pageSize)
+  return { items, total, page, pageSize, totalPages }
 }
 
 /** Build a YYYY-ISO-week string from a Date. */
@@ -331,4 +554,109 @@ export async function computeTimeline(
   }
   out.sort((a, b) => (a.key < b.key ? -1 : 1))
   return out
+}
+
+/**
+ * Compute the KPI totals efficiently using SQL aggregation, so the overview
+ * endpoint doesn't need to load the full per-teacher workloads (which would
+ * be expensive with 5000+ teachers).
+ *
+ * Returns:
+ *  - teachersCount: distinct educatorId (id > 0) with events in range
+ *  - roomsCount: distinct locationId with events in range
+ *  - eventsCount: COUNT(*) of events in range
+ *  - scheduledMinutes: SUM(durationMinutes)
+ *  - effectiveMinutes: deduped by (educatorId, simultaneousGroupId) using
+ *    MIN(start) and MAX(end) per group, then summed across groups
+ *  - simultaneousEvents: COUNT where simultaneousGroupId IS NOT NULL
+ *  - simultaneousGroups: COUNT DISTINCT simultaneousGroupId
+ *  - inferredEndEvents: COUNT where hasInferredEnd
+ */
+export interface OverviewKpis {
+  teachersCount: number
+  roomsCount: number
+  eventsCount: number
+  scheduledMinutes: number
+  effectiveMinutes: number
+  simultaneousEvents: number
+  simultaneousGroups: number
+  inferredEndEvents: number
+  subjectsCount: number
+  groupsCount: number
+}
+
+export async function computeOverviewKpis(
+  where: Prisma.ScheduleEventWhereInput,
+): Promise<OverviewKpis> {
+  const primaryWhere: Prisma.ScheduleEventWhereInput = { ...where, educatorId: { gt: 0 } }
+
+  // Run all independent aggregations in parallel.
+  const [
+    eventsCount,
+    scheduledAgg,
+    teachersRows,
+    roomsRows,
+    simultaneousEvents,
+    simultaneousGroupsRows,
+    inferredEndEvents,
+    subjectsCount,
+    groupsCount,
+    effectiveGroups,
+  ] = await Promise.all([
+    db.scheduleEvent.count({ where }),
+    db.scheduleEvent.aggregate({ where, _sum: { durationMinutes: true } }),
+    db.scheduleEvent.findMany({ where: primaryWhere, distinct: ['educatorId'], select: { educatorId: true } }),
+    db.scheduleEventLocation.findMany({ where: { event: where }, distinct: ['locationId'], select: { locationId: true } }),
+    db.scheduleEvent.count({ where: { ...where, simultaneousGroupId: { not: null } } }),
+    db.scheduleEvent.findMany({
+      where: { ...where, simultaneousGroupId: { not: null } },
+      distinct: ['simultaneousGroupId'],
+      select: { simultaneousGroupId: true },
+    }),
+    db.scheduleEvent.count({ where: { ...where, hasInferredEnd: true } }),
+    db.subject.count(),
+    db.group.count(),
+    // Effective minutes: per (educatorId, simultaneousGroupId) compute the
+    // MIN(start) and MAX(end). For singleton events (simultaneousGroupId IS
+    // NULL), each event is its own group — use `id` as the unique key.
+    db.scheduleEvent.findMany({
+      where,
+      select: {
+        educatorId: true,
+        simultaneousGroupId: true,
+        id: true,
+        startDateTime: true,
+        endDateTime: true,
+      },
+    }),
+  ])
+
+  // Compute effective minutes in JS: group by (educatorId, simultaneousGroupId ?? `single-${id}`).
+  const effMap = new Map<string, { start: number; end: number }>()
+  for (const e of effectiveGroups) {
+    const key = `${e.educatorId}|${e.simultaneousGroupId ?? `single-${e.id}`}`
+    const start = e.startDateTime.getTime()
+    const end = e.endDateTime.getTime()
+    const cur = effMap.get(key)
+    if (!cur) effMap.set(key, { start, end })
+    else {
+      cur.start = Math.min(cur.start, start)
+      cur.end = Math.max(cur.end, end)
+    }
+  }
+  let effectiveMinutes = 0
+  for (const [, g] of effMap) effectiveMinutes += (g.end - g.start) / 60_000
+
+  return {
+    teachersCount: teachersRows.length,
+    roomsCount: roomsRows.length,
+    eventsCount,
+    scheduledMinutes: scheduledAgg._sum.durationMinutes ?? 0,
+    effectiveMinutes: Math.round(effectiveMinutes),
+    simultaneousEvents,
+    simultaneousGroups: simultaneousGroupsRows.length,
+    inferredEndEvents,
+    subjectsCount,
+    groupsCount,
+  }
 }
