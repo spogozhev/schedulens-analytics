@@ -18,7 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { KpiCard } from './kpi-card'
 import { AreaChartCard, BarChartCard, Heatmap, PieChartCard } from './charts'
-import { CHART_COLORS, formatHours, formatNumber, SEQUENCE } from './palette'
+import { CHART_COLORS, formatHours, formatNumber, KIND_COLORS } from './palette'
 import { useDashboardStore, buildFilterQuery } from '@/lib/dashboard-store'
 import { useOverview, useTimeline } from '@/lib/api-hooks'
 
@@ -42,10 +42,10 @@ export function OverviewTab() {
     Эффективно_часов: Math.round((b.effectiveMinutes / 60) * 10) / 10,
   }))
 
-  const byKindData = data.byKind.map((k: { kindCode: number; label: string; count: number }, i: number) => ({
+  const byKindData = data.byKind.map((k: { kindCode: number; label: string; count: number }) => ({
     name: k.label,
     value: k.count,
-    color: SEQUENCE[i % SEQUENCE.length],
+    color: KIND_COLORS[k.kindCode] ?? CHART_COLORS.muted,
   }))
 
   // Stacked-by-month data: each row is { month, [kindLabel]: count }.
@@ -54,14 +54,13 @@ export function OverviewTab() {
   const byMonthByKindData = (data.byMonthByKind ?? []) as Array<Record<string, number | string>>
 
   // Series for the stacked-by-month chart: one bar per kind, stacked.
-  // Colors match the pie chart (uses SEQUENCE in declaration order).
-  const byMonthSeries = data.byKind.map(
-    (k: { label: string }, i: number) => ({
-      key: k.label,
-      label: k.label,
-      color: SEQUENCE[i % SEQUENCE.length],
-    }),
-  )
+  // Colors are matched to the pie chart via KIND_COLORS (by kindCode) so the
+  // two charts stay visually consistent.
+  const byMonthSeries = data.byKind.map((k: { kindCode: number; label: string }) => ({
+    key: k.label,
+    label: k.label,
+    color: KIND_COLORS[k.kindCode] ?? CHART_COLORS.muted,
+  }))
 
   const topTeachersData = data.topTeachers.map((t: { id: number; name: string; effectiveHours: number; scheduledHours: number }) => ({
     name: t.name,

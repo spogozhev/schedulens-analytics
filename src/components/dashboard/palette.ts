@@ -42,6 +42,24 @@ export const KIND_LABELS: Record<number, string> = {
   2: 'Сессия',
 }
 
+// Color per kindCode. Used by the pie chart "По типу занятий" and the
+// stacked bar chart "Распределение по месяцам по типам занятий" so both
+// charts stay visually consistent.
+//
+// The three colors are intentionally chosen to be highly distinguishable:
+//   - Индивидуальные мероприятия (0): blue  — distinct from green and amber
+//   - Регулярные занятия (1):       green — primary bulk of the schedule
+//   - Сессия / консультации (2):     amber — warm tone, contrasts with blue
+//
+// (The project default palette avoids indigo/blue, but the user explicitly
+// requested a blue shade for Индивидуальные мероприятия to distinguish it
+// from the warm amber of Сессия / консультации.)
+export const KIND_COLORS: Record<number, string> = {
+  0: '#2563eb', // blue-600 — Индивидуальные мероприятия
+  1: '#16a34a', // green-600 — Регулярные занятия
+  2: '#d97706', // amber-600 — Сессия / консультации
+}
+
 export function formatHours(h: number): string {
   if (h === 0) return '0 ч'
   if (h < 1) return `${Math.round(h * 60)} мин`
