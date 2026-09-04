@@ -36,10 +36,10 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
           dateStr: true,
           rawStart: true,
           rawEnd: true,
+          lectureHash: true,
           subject: { select: { name: true } },
           locations: { include: { location: { select: { displayName: true } } } },
           groups: { include: { group: { select: { name: true } } } },
-          coEducators: { include: { educator: { select: { displayName: true, longName: true } } } },
         },
         orderBy: { startDateTime: 'asc' },
       },
@@ -49,6 +49,33 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
 
   const events = teacher.events
   const scheduledMinutes = events.reduce((s, e) => s + e.durationMinutes, 0)
+
+  // Derive co-teachers from `lectureHash` — every ScheduleEvent with the
+  // same lectureHash and a DIFFERENT educatorId (> 0, i.e. a real teacher
+  // not a co-teacher placeholder) is a co-teacher of this event.
+  // We collect the lectureHashes of the recent 100 events (the ones we'll
+  // return in `recentEvents`) and do a single query.
+  const recentEventsRaw = events.slice(-100).reverse()
+  const recentLectureHashes = [...new Set(recentEventsRaw.map((e) => e.lectureHash))]
+  const coTeacherRows = recentLectureHashes.length > 0
+    ? await db.scheduleEvent.findMany({
+        where: {
+          lectureHash: { in: recentLectureHashes },
+          educatorId: { gt: 0, not: id },
+        },
+        select: {
+          lectureHash: true,
+          educator: { select: { displayName: true, longName: true } },
+        },
+      })
+    : []
+  // Build map: lectureHash → Set of co-teacher display names
+  const coTeachersByHash = new Map<string, string[]>()
+  for (const row of coTeacherRows) {
+    const arr = coTeachersByHash.get(row.lectureHash) ?? []
+    if (!arr.includes(row.educator.displayName)) arr.push(row.educator.displayName)
+    coTeachersByHash.set(row.lectureHash, arr)
+  }
 
   // Effective minutes (dedupe by simultaneous group).
   const groups = new Map<string, { start: number; end: number; events: typeof events }>()
@@ -117,8 +144,8 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   const byKindMap = new Map<number, number>()
   for (const e of events) byKindMap.set(e.kindCode, (byKindMap.get(e.kindCode) ?? 0) + 1)
 
-  // Recent events (max 100)
-  const recentEvents = events.slice(-100).reverse().map((e) => ({
+  // Recent events (max 100) — derive co-teachers from the lectureHash map
+  const recentEvents = recentEventsRaw.map((e) => ({
     id: e.id,
     start: e.startDateTime.toISOString(),
     end: e.endDateTime.toISOString(),
@@ -134,7 +161,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     simultaneousGroupId: e.simultaneousGroupId,
     locations: e.locations.map((l) => l.location.displayName),
     groups: e.groups.map((g) => g.group.name),
-    coEducators: e.coEducators.map((c) => c.educator.displayName),
+    coEducators: coTeachersByHash.get(e.lectureHash) ?? [],
   }))
 
   // Sample simultaneous groups (max 30)

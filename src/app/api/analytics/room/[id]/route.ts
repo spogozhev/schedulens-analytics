@@ -37,7 +37,6 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
               subject: { select: { name: true } },
               educator: { select: { id: true, displayName: true, longName: true } },
               groups: { include: { group: { select: { name: true } } } },
-              coEducators: { include: { educator: { select: { displayName: true } } } },
             },
           },
         },
@@ -64,7 +63,6 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     educatorName: string
     educatorLongName: string
     groups: string[]
-    coEducators: string[]
   }[] = []
   for (const le of room.events) {
     const ev = le.event
@@ -84,10 +82,34 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
       educatorName: ev.educator.displayName,
       educatorLongName: ev.educator.longName,
       groups: ev.groups.map((g) => g.group.name),
-      coEducators: ev.coEducators.map((c) => c.educator.displayName),
     })
   }
   lectures.sort((a, b) => a.start.getTime() - b.start.getTime())
+
+  // Derive co-teachers from `lectureHash` — for each lecture, find other
+  // ScheduleEvent rows with the same lectureHash and a different educatorId
+  // (> 0). One query covers all lectures.
+  const allLectureHashes = lectures.map((l) => l.hash)
+  const coTeacherRows = allLectureHashes.length > 0
+    ? await db.scheduleEvent.findMany({
+        where: {
+          lectureHash: { in: allLectureHashes },
+          educatorId: { gt: 0 },
+        },
+        select: {
+          lectureHash: true,
+          educatorId: true,
+          educator: { select: { displayName: true } },
+        },
+      })
+    : []
+  // Build map: lectureHash → Map(educatorId → displayName) — all teachers
+  // (including the primary) who deliver this physical lecture.
+  const educatorsByHash = new Map<string, Map<number, string>>()
+  for (const row of coTeacherRows) {
+    if (!educatorsByHash.has(row.lectureHash)) educatorsByHash.set(row.lectureHash, new Map())
+    educatorsByHash.get(row.lectureHash)!.set(row.educatorId, row.educator.displayName)
+  }
 
   const totalMinutes = lectures.reduce((s, l) => s + l.minutes, 0)
   const eventsCount = room.events.length
@@ -145,23 +167,35 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     .sort((a, b) => b.hours - a.hours)
     .slice(0, 10)
 
-  // Recent events (latest 100)
-  const recentEvents = [...lectures].slice(-100).reverse().map((l) => ({
-    id: l.id,
-    start: l.start.toISOString(),
-    end: l.end.toISOString(),
-    durationMinutes: l.minutes,
-    subject: l.subject,
-    kindCode: l.kindCode,
-    dayOfWeek: l.dayOfWeek,
-    dayName: dayName(l.dayOfWeek),
-    isCanceled: l.isCanceled,
-    educatorId: l.educatorId,
-    educatorName: l.educatorName,
-    educatorLongName: l.educatorLongName,
-    groups: l.groups,
-    coEducators: l.coEducators,
-  }))
+  // Recent events (latest 100) — derive co-teachers from the educatorsByHash
+  // map (all teachers with the same lectureHash minus the primary educator).
+  const recentEvents = [...lectures].slice(-100).reverse().map((l) => {
+    const allEducators = educatorsByHash.get(l.hash)
+    const coEducators: string[] = []
+    if (allEducators) {
+      for (const [educatorId, name] of allEducators) {
+        if (educatorId !== l.educatorId && !coEducators.includes(name)) {
+          coEducators.push(name)
+        }
+      }
+    }
+    return {
+      id: l.id,
+      start: l.start.toISOString(),
+      end: l.end.toISOString(),
+      durationMinutes: l.minutes,
+      subject: l.subject,
+      kindCode: l.kindCode,
+      dayOfWeek: l.dayOfWeek,
+      dayName: dayName(l.dayOfWeek),
+      isCanceled: l.isCanceled,
+      educatorId: l.educatorId,
+      educatorName: l.educatorName,
+      educatorLongName: l.educatorLongName,
+      groups: l.groups,
+      coEducators,
+    }
+  })
 
   return NextResponse.json({
     id: room.id,

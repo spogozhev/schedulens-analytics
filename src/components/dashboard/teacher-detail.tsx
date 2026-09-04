@@ -270,7 +270,14 @@ export function TeacherDetailDialog() {
                             <TableCell className="text-sm text-muted-foreground truncate max-w-[200px]" title={e.locations.join(', ')}>
                               {e.locations[0] ?? '—'}
                             </TableCell>
-                            <TableCell className="text-right tabular-nums">{e.groups.length}</TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {e.groups.length}
+                              {e.coEducators.length > 0 && (
+                                <span className="ml-1 text-xs text-cyan-600 dark:text-cyan-400" title={`Со-преподаватели: ${e.coEducators.join(', ')}`}>
+                                  +{e.coEducators.length} сотр.
+                                </span>
+                              )}
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>

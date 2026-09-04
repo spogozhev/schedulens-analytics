@@ -24,7 +24,6 @@ model Educator {
   isSpringTerm Boolean    @default(true)
 
   events           ScheduleEvent[]          @relation("PrimaryEducatorEvents")
-  coTeachingEvents ScheduleEventEducator[]
 
   @@index([scheduleFrom, scheduleTo])
 }
@@ -110,7 +109,6 @@ model ScheduleEvent {
 
   // Relations
   locations     ScheduleEventLocation[]
-  coEducators   ScheduleEventEducator[]
   groups        ScheduleEventGroup[]
 
   @@unique([educatorId, startDateTime, subjectId, globalEventHash])
@@ -132,16 +130,6 @@ model ScheduleEventLocation {
 
   @@id([eventId, locationId])
   @@index([locationId])
-}
-
-model ScheduleEventEducator {
-  eventId    String
-  educatorId Int
-  event      ScheduleEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  educator   Educator     @relation(fields: [educatorId], references: [id])
-
-  @@id([eventId, educatorId])
-  @@index([educatorId])
 }
 
 model ScheduleEventGroup {
