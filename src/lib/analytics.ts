@@ -380,16 +380,27 @@ export async function computeRoomWorkloads(
       continue
     }
     // Dedupe by lectureHash → unique physical lectures.
+    //
+    // NOTE: the same physical lecture appears multiple times in `l.events`
+    // — once for each student group that attends it. We MUST dedupe by
+    // `lectureHash` BEFORE building the `lectures` array and BEFORE the
+    // conflict-detection loop, otherwise:
+    //   - each duplicate is treated as a separate "lecture" and the conflict
+    //     loop counts the same pair of overlapping lectures N×M times
+    //     (where N, M are the duplicate counts of the two lectures);
+    //   - the conflict count on the rooms ranking page diverges from the
+    //     conflict count on the room detail page (which dedupes correctly).
+    //
+    // The `seen` Set is also used for the `uniqueLectures` count below.
     const seen = new Set<string>()
     let totalMinutes = 0
     const lectures: { start: number; end: number; hash: string }[] = []
     for (const le of l.events) {
       const ev = le.event
+      if (seen.has(ev.lectureHash)) continue
+      seen.add(ev.lectureHash)
       lectures.push({ start: ev.startDateTime.getTime(), end: ev.endDateTime.getTime(), hash: ev.lectureHash })
-      if (!seen.has(ev.lectureHash)) {
-        seen.add(ev.lectureHash)
-        totalMinutes += ev.durationMinutes
-      }
+      totalMinutes += ev.durationMinutes
     }
     // Detect conflicts: same room, overlapping intervals, DIFFERENT lectureHash.
     // NOTE: intervals that merely touch at a boundary (b.start === a.end, e.g.
@@ -403,13 +414,21 @@ export async function computeRoomWorkloads(
         const a = lectures[i]
         const b = lectures[j]
         if (b.start >= a.end) break // sorted, no further overlap
+        // `a.hash !== b.hash` is now guaranteed true because we deduped
+        // by lectureHash above — but keep the check for clarity / safety.
         if (a.hash !== b.hash) conflicts++
       }
     }
     result.push({
       id: l.id,
       displayName: l.displayName,
-      eventsCount: lectures.length,
+      // `eventsCount` is the number of `ScheduleEvent` rows linked to this
+      // room — including duplicates of the same physical lecture that
+      // appear once per student group. This matches `room.events.length`
+      // in the room detail endpoint so the two pages stay consistent.
+      eventsCount: l.events.length,
+      // `uniqueLectures` is the count of DISTINCT physical lectures
+      // (one per `lectureHash`) — deduped above.
       uniqueLectures: seen.size,
       totalMinutes,
       conflicts,
