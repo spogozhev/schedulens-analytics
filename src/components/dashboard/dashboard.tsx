@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Badge } from '@/components/ui/badge'
-import { CalendarClock, Layers, LayoutDashboard, Users, MapPin } from 'lucide-react'
+import { CalendarClock, Github, Layers, LayoutDashboard, Users, MapPin } from 'lucide-react'
 import { FiltersBar } from './filters-bar'
 import { ThemeToggle } from './theme-toggle'
 import { OverviewTab } from './overview-tab'
@@ -87,9 +87,15 @@ function Footer() {
         <div>
           Источник данных: timetable.spbu.ru · 2025/2026 уч. год
         </div>
-        <div>
-          Дедупликация времени для одновременных занятий
-        </div>
+        <a
+          href="https://github.com/spogozhev/schedulens-analytics"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 hover:text-foreground transition-colors"
+        >
+          <Github className="h-3.5 w-3.5" />
+          schedulens-analytics
+        </a>
       </div>
     </footer>
   )
