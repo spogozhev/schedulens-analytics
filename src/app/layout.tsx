@@ -20,7 +20,7 @@ export const metadata: Metadata = {
   description:
     "Дашборд анализа загруженности преподавателей и аудиторий: рейтинги, графики, учёт одновременных занятий.",
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/logo.svg",
   },
 };
 

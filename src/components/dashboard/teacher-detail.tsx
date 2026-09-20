@@ -57,7 +57,9 @@ export function TeacherDetailDialog() {
             {data ? `ID ${data.id}` : ''}
             {data?.employments && data.employments.length > 0 && (
               <span className="mt-0.5 block">
-                {data.employments.map((e) => `${e.position}, ${e.department}`).join('; ')}
+                {data.employments
+                  .map((e) => (e.department ? `${e.position}, ${e.department}` : e.position))
+                  .join('; ')}
               </span>
             )}
           </DialogDescription>

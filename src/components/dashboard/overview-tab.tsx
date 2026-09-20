@@ -255,8 +255,8 @@ export function OverviewTab() {
         </CardContent>
       </Card>
 
-      {/* Row: by-kind pie (from /by-kind) + lesson-form distribution (from /by-lesson-form) */}
-      <div className="grid gap-6 lg:grid-cols-2">
+      {/* Row: by-kind pie (1/3 width) + lesson-form distribution (2/3 width) */}
+      <div className="grid gap-6 lg:grid-cols-3">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">По типу занятий</CardTitle>
@@ -278,7 +278,7 @@ export function OverviewTab() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle className="text-base">По формам занятий</CardTitle>
             <CardDescription>Распределение событий по форме проведения</CardDescription>
@@ -297,7 +297,7 @@ export function OverviewTab() {
                   yFormatter={(v) => formatNumber(v)}
                   height={340}
                   horizontal
-                  yWidth={190}
+                  yWidth={210}
                 />
               )}
             </QuerySection>

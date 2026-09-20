@@ -187,7 +187,11 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     id: teacher.id,
     displayName: teacher.displayName,
     longName: teacher.longName,
-    employments: teacher.employments,
+    // Flat strings for the UI; department is null when the staff export had none.
+    employments: teacher.employments.map((e) => ({
+      position: e.position,
+      department: e.department?.name ?? null,
+    })),
     kpis: {
       eventsCount: events.length,
       scheduledHours: Math.round((scheduledMinutes / 60) * 10) / 10,
