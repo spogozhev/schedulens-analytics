@@ -1,9 +1,17 @@
 import { NextResponse } from 'next/server'
+import type { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import { buildEventWhere, dayName, hourOf, type CommonFilters } from '@/lib/analytics'
+import { slowCached } from '@/lib/slow-cache'
 
 export const dynamic = 'force-dynamic'
 
+/**
+ * Full room card. The computation loads the room's events from two places
+ * (primary + additional locations), dedupes by lectureHash and sweeps
+ * conflicts in JS — it runs under the slow-query cache keyed by
+ * (id, filters); see src/lib/slow-cache.ts.
+ */
 export async function GET(request: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id: idStr } = await ctx.params
   const id = parseInt(idStr, 10)
@@ -17,6 +25,13 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   }
   const where = buildEventWhere(filters)
 
+  const detail = await slowCached('roomDetail', { id, filters }, () => loadRoomDetail(id, where))
+  if (detail === null) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  return NextResponse.json(detail)
+}
+
+/** Room-card payload, or null when the location id is unknown. */
+async function loadRoomDetail(id: number, where: Prisma.ScheduleEventWhereInput) {
   const eventSelect = {
     id: true,
     startDateTime: true,
@@ -42,7 +57,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
       select: eventSelect,
     }),
   ])
-  if (!room) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  if (!room) return null
   const allEvents = [...primaryEvents, ...extraEvents]
 
   // Dedupe by lectureHash — each physical lecture is one utilization slot.
@@ -196,7 +211,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     }
   })
 
-  return NextResponse.json({
+  return {
     id: room.id,
     name: room.displayName,
     latitude: room.latitude,
@@ -213,5 +228,5 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     bySubject,
     byEducator,
     recentEvents,
-  })
+  }
 }

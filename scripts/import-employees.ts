@@ -24,6 +24,7 @@
 import fs from 'fs/promises'
 import { db } from '../src/lib/db'
 import { isSqlite } from '../src/lib/sql-dialect'
+import { invalidateServerCache } from './invalidate-cache'
 import type { Prisma } from '@prisma/client'
 
 const norm = (s: string): string => s.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim()
@@ -344,6 +345,9 @@ async function main(): Promise<void> {
   console.log(`Educators linked to a top-level unit (set/updated this run): ${educatorsLinked}`)
   console.log(`Educator rows with a top-level unit: ${educatorsWithUnit} of ${educators.length}`)
   console.log(`Top-level units in dictionary: ${units}`)
+
+  // Unit assignments feed the analytics cache — drop it.
+  await invalidateServerCache();
 }
 
 main()

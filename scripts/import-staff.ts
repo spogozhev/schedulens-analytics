@@ -21,6 +21,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { db } from '../src/lib/db'
 import { isSqlite } from '../src/lib/sql-dialect'
+import { invalidateServerCache } from './invalidate-cache'
 import type { Prisma } from '@prisma/client'
 
 interface RawEmployment {
@@ -179,6 +180,9 @@ async function main(): Promise<void> {
   console.log(
     `Educator table now: ${educatorsTotal} rows, ${withEmployments.length} with employments. Time: ${((Date.now() - t0) / 1000).toFixed(1)}s.`,
   )
+
+  // Educator names/departments feed the analytics cache — drop it.
+  await invalidateServerCache();
 }
 
 main()
