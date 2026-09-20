@@ -297,7 +297,7 @@ export function OverviewTab() {
                   yFormatter={(v) => formatNumber(v)}
                   height={340}
                   horizontal
-                  yWidth={210}
+                  yWidth={250}
                 />
               )}
             </QuerySection>
