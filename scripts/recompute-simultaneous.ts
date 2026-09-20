@@ -18,6 +18,7 @@
 
 import { db } from '../src/lib/db'
 import { isSqlite } from '../src/lib/sql-dialect'
+import { invalidateServerCache } from './invalidate-cache'
 import type { Prisma } from '@prisma/client'
 
 async function setupPragmas(): Promise<void> {
@@ -147,6 +148,9 @@ async function main() {
   console.log(`Total events: ${totalEvents}`)
   console.log(`Events flagged simultaneous (re-checked): ${totalSim}`)
   console.log(`Distinct simultaneous groups (re-checked): ${distinctSim.length}`)
+
+  // simultaneousGroupId feeds every analytics computation — drop the cache.
+  await invalidateServerCache()
 
   await db.$disconnect()
 }

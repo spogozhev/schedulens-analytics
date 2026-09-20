@@ -1,9 +1,17 @@
 import { NextResponse } from 'next/server'
+import type { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import { buildEventWhere, dayName, hourOf, type CommonFilters } from '@/lib/analytics'
+import { slowCached } from '@/lib/slow-cache'
 
 export const dynamic = 'force-dynamic'
 
+/**
+ * Full teacher card. The computation loads ALL of the teacher's events
+ * into JS and aggregates by week/day/hour/subject/kind — the heaviest
+ * non-SQL path in the app — so it runs under the slow-query cache keyed
+ * by (id, filters); see src/lib/slow-cache.ts.
+ */
 export async function GET(request: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id: idStr } = await ctx.params
   const id = parseInt(idStr, 10)
@@ -17,6 +25,15 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   }
   const where = buildEventWhere(filters)
 
+  const detail = await slowCached('teacherDetail', { id, filters }, () =>
+    loadTeacherDetail(id, where),
+  )
+  if (detail === null) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  return NextResponse.json(detail)
+}
+
+/** Teacher-card payload, or null when the educator id is unknown. */
+async function loadTeacherDetail(id: number, where: Prisma.ScheduleEventWhereInput) {
   const teacher = await db.educator.findUnique({
     where: { id },
     include: {
@@ -48,7 +65,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
       },
     },
   })
-  if (!teacher) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  if (!teacher) return null
 
   const events = teacher.events
   const scheduledMinutes = events.reduce((s, e) => s + e.durationMinutes, 0)
@@ -183,7 +200,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     })),
   }))
 
-  return NextResponse.json({
+  return {
     id: teacher.id,
     displayName: teacher.displayName,
     longName: teacher.longName,
@@ -211,5 +228,5 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     byKind: [...byKindMap.entries()].map(([kind, count]) => ({ kindCode: kind, count })),
     recentEvents,
     simultaneousGroups: simultaneousGroupSamples,
-  })
+  }
 }

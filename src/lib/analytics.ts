@@ -1,4 +1,5 @@
 import { db } from '@/lib/db'
+import { slowCached } from '@/lib/slow-cache'
 import { withTiming } from '@/lib/timing'
 import {
   adaptPlaceholders,
@@ -203,7 +204,17 @@ export interface PaginatedResult<T> {
  * index — an order of magnitude faster than Prisma's distinct, which loads
  * every matching event id.
  */
-async function findEducatorIdsWithEvents(
+function findEducatorIdsWithEvents(
+  where: Prisma.ScheduleEventWhereInput,
+  search?: string,
+  topLevelUnitId?: number,
+): Promise<Set<number>> {
+  return slowCached('findEducatorIdsWithEvents', [where, search, topLevelUnitId], () =>
+    findEducatorIdsWithEventsUncached(where, search, topLevelUnitId),
+  )
+}
+
+async function findEducatorIdsWithEventsUncached(
   where: Prisma.ScheduleEventWhereInput,
   search?: string,
   topLevelUnitId?: number,
@@ -257,7 +268,16 @@ async function findEducatorIdsWithEvents(
  * Implemented as a single GROUP BY aggregation: with 400k+ events, loading
  * every event into JS costs tens of seconds, SQLite answers this in ~2s.
  */
-export async function computeTeacherWorkloads(
+export function computeTeacherWorkloads(
+  where: Prisma.ScheduleEventWhereInput,
+  options?: { educatorIds?: number[] },
+): Promise<TeacherWorkload[]> {
+  return slowCached('teacherWorkloads', [where, options], () =>
+    computeTeacherWorkloadsUncached(where, options),
+  )
+}
+
+async function computeTeacherWorkloadsUncached(
   where: Prisma.ScheduleEventWhereInput,
   options?: { educatorIds?: number[] },
 ): Promise<TeacherWorkload[]> {
@@ -387,7 +407,9 @@ export async function computeTeacherWorkloadsPaginated(
   if (idSet.size === 0) {
     return { items: [], total: 0, page: options.page, pageSize: options.pageSize, totalPages: 0 }
   }
-  const educatorIds = [...idSet]
+  // Sorted so the cache key (and the SQL IN-list) is deterministic — the DB
+  // does not guarantee row order for the DISTINCT id query.
+  const educatorIds = [...idSet].sort((a, b) => a - b)
   const workloads = await computeTeacherWorkloads(where, { educatorIds })
   const sorted = sortTeachers(workloads, options.sort)
   const total = sorted.length
@@ -424,7 +446,16 @@ export interface RoomWorkload {
  * The conflict sweep runs in JS: lectures are sorted by start time and the
  * inner loop breaks at the first non-overlapping lecture.
  */
-export async function computeRoomWorkloads(
+export function computeRoomWorkloads(
+  where: Prisma.ScheduleEventWhereInput,
+  options?: { locationIds?: number[] },
+): Promise<RoomWorkload[]> {
+  return slowCached('roomWorkloads', [where, options], () =>
+    computeRoomWorkloadsUncached(where, options),
+  )
+}
+
+async function computeRoomWorkloadsUncached(
   where: Prisma.ScheduleEventWhereInput,
   options?: { locationIds?: number[] },
 ): Promise<RoomWorkload[]> {
@@ -618,7 +649,9 @@ export async function computeRoomWorkloadsPaginated(
   if (idSet.size === 0) {
     return { items: [], total: 0, page: options.page, pageSize: options.pageSize, totalPages: 0 }
   }
-  const locationIds = [...idSet]
+  // Sorted so the cache key (and the SQL IN-list) is deterministic — the DB
+  // does not guarantee row order for the DISTINCT id query.
+  const locationIds = [...idSet].sort((a, b) => a - b)
   const workloads = await computeRoomWorkloads(where, { locationIds })
   const sorted = sortRooms(workloads, options.sort)
   const total = sorted.length
@@ -638,7 +671,17 @@ export async function computeRoomWorkloadsPaginated(
  * Two arms (see schema): events' denormalized primary location, plus the
  * additional-location links table (~52k rows).
  */
-async function findLocationIdsWithEvents(
+function findLocationIdsWithEvents(
+  where: Prisma.ScheduleEventWhereInput,
+  search?: string,
+  addressIds?: number[],
+): Promise<Set<number>> {
+  return slowCached('findLocationIdsWithEvents', [where, search, addressIds], () =>
+    findLocationIdsWithEventsUncached(where, search, addressIds),
+  )
+}
+
+async function findLocationIdsWithEventsUncached(
   where: Prisma.ScheduleEventWhereInput,
   search?: string,
   addressIds?: number[],
@@ -732,7 +775,16 @@ function timelineBucketExpr(granularity: 'day' | 'week'): string {
  * union, summed per bucket. Simultaneous groups share the same time slot, so
  * they never span buckets.
  */
-export async function computeTimeline(
+export function computeTimeline(
+  where: Prisma.ScheduleEventWhereInput,
+  granularity: 'day' | 'week' = 'week',
+): Promise<TimelineBucket[]> {
+  return slowCached('timeline', [where, granularity], () =>
+    computeTimelineUncached(where, granularity),
+  )
+}
+
+async function computeTimelineUncached(
   where: Prisma.ScheduleEventWhereInput,
   granularity: 'day' | 'week' = 'week',
 ): Promise<TimelineBucket[]> {
@@ -790,7 +842,13 @@ export interface OverviewKpis {
   groupsCount: number
 }
 
-export async function computeOverviewKpis(
+export function computeOverviewKpis(
+  where: Prisma.ScheduleEventWhereInput,
+): Promise<OverviewKpis> {
+  return slowCached('overviewKpis', [where], () => computeOverviewKpisUncached(where))
+}
+
+async function computeOverviewKpisUncached(
   where: Prisma.ScheduleEventWhereInput,
 ): Promise<OverviewKpis> {
   return withTiming('analytics:overviewKpis:sql-agg', async () => {
@@ -852,7 +910,13 @@ const MONTH_NAMES_RU = [
  * pulling all events into JS and grouping there. Returns a flat array of
  * `{ month, monthLabel, kindCode, count }` rows sorted by month.
  */
-export async function computeByMonthByKind(
+export function computeByMonthByKind(
+  where: Prisma.ScheduleEventWhereInput,
+): Promise<{ month: number; monthLabel: string; kindCode: number; count: number }[]> {
+  return slowCached('byMonthByKind', [where], () => computeByMonthByKindUncached(where))
+}
+
+async function computeByMonthByKindUncached(
   where: Prisma.ScheduleEventWhereInput,
 ): Promise<{ month: number; monthLabel: string; kindCode: number; count: number }[]> {
   const w = sqlEventWhere(where)
@@ -900,7 +964,13 @@ export interface HeatmapCell {
  * Single GROUP BY query; the grid is filled from the ~100 non-empty
  * (day, hour) rows instead of materializing every event.
  */
-export async function computeHeatmap(
+export function computeHeatmap(
+  where: Prisma.ScheduleEventWhereInput,
+): Promise<HeatmapCell[][]> {
+  return slowCached('heatmap', [where], () => computeHeatmapUncached(where))
+}
+
+async function computeHeatmapUncached(
   where: Prisma.ScheduleEventWhereInput,
 ): Promise<HeatmapCell[][]> {
   return withTiming('analytics:heatmap:compute', async () => {

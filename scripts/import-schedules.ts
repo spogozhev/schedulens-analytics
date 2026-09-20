@@ -66,6 +66,7 @@ import { isSqlite } from '../src/lib/sql-dialect';
 import type { Prisma } from '@prisma/client';
 import { extractLessonForm } from './lesson-forms';
 import { parseLocationAddress } from './address-parse';
+import { invalidateServerCache } from './invalidate-cache';
 
 // ---------- Types ----------
 
@@ -823,6 +824,9 @@ async function main() {
   console.log(`Import:  ${((tImportEnd - tImportStart) / 1000).toFixed(2)}s`);
   console.log(`Simult:  ${((tSimEnd - tSimStart) / 1000).toFixed(2)}s`);
   console.log(`Total:   ${((tSimEnd - t0) / 1000).toFixed(2)}s`);
+
+  // Step 7: the dataset changed — ask the running server to drop its slow-query cache.
+  await invalidateServerCache();
 
   await db.$disconnect();
 }
