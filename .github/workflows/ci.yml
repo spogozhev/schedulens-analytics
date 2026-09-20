@@ -26,6 +26,9 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
+      # Generates the Prisma client into node_modules (gitignored): without it
+      # @prisma/client exports no Prisma/PrismaClient types and tsc fails.
+      - run: bun run db:generate
       # Generates next-env.d.ts and .next/types (gitignored) required by tsc.
       - run: bunx next typegen
       - run: bunx tsc --noEmit
