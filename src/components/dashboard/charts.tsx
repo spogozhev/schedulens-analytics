@@ -136,6 +136,9 @@ interface BarChartCardProps {
   height?: number
   horizontal?: boolean
   yWidth?: number
+  /** Truncates category tick labels on the Y axis of a horizontal chart
+   *  (single line, no wrapping). The data/tooltip keep the full value. */
+  yTickFormatter?: (value: string) => string
   /** When true, bars are stacked on top of each other (one bar per series). */
   stacked?: boolean
   /** When true (default), X-axis labels are rotated -20° for long names.
@@ -152,6 +155,7 @@ export function BarChartCard({
   height = 280,
   horizontal = false,
   yWidth = 48,
+  yTickFormatter,
   stacked = false,
   rotateX = true,
 }: BarChartCardProps) {
@@ -193,6 +197,7 @@ export function BarChartCard({
       width={yWidth}
       fontSize={10}
       interval={0}
+      tickFormatter={yTickFormatter}
     />
   ) : (
     <YAxis

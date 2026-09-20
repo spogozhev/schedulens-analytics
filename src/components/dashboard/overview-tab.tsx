@@ -263,7 +263,7 @@ export function OverviewTab() {
             <CardDescription>Распределение событий</CardDescription>
           </CardHeader>
           <CardContent>
-            <QuerySection query={byKindQ} skeleton={<ChartSkeleton height={340} />}>
+            <QuerySection query={byKindQ} skeleton={<ChartSkeleton height={400} />}>
               {(d) => (
                 <PieChartCard
                   data={d.byKind.map((k) => ({
@@ -271,7 +271,7 @@ export function OverviewTab() {
                     value: k.count,
                     color: KIND_COLORS[k.kindCode] ?? CHART_COLORS.muted,
                   }))}
-                  height={340}
+                  height={400}
                 />
               )}
             </QuerySection>
@@ -284,7 +284,7 @@ export function OverviewTab() {
             <CardDescription>Распределение событий по форме проведения</CardDescription>
           </CardHeader>
           <CardContent>
-            <QuerySection query={byLessonFormQ} skeleton={<ChartSkeleton height={340} />}>
+            <QuerySection query={byLessonFormQ} skeleton={<ChartSkeleton height={400} />}>
               {(d) => (
                 <BarChartCard
                   // Ascending order: recharts plots the first category at the
@@ -295,9 +295,13 @@ export function OverviewTab() {
                   xKey="name"
                   series={[{ key: 'count', label: 'Событий' }]}
                   yFormatter={(v) => formatNumber(v)}
-                  height={340}
+                  height={400}
                   horizontal
                   yWidth={250}
+                  // Single-line truncated ticks: long form names would
+                  // otherwise wrap onto two lines and overlap neighbours.
+                  // Full names remain in the tooltip.
+                  yTickFormatter={(v) => (v.length > 30 ? `${v.slice(0, 28)}…` : v)}
                 />
               )}
             </QuerySection>
