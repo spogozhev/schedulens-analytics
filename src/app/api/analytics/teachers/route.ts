@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 import {
   buildEventWhere,
+  parseCommonFilters,
   computeTeacherWorkloadsPaginated,
-  type CommonFilters,
   type TeacherSortKey,
 } from '@/lib/analytics'
 
@@ -10,12 +10,7 @@ export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request) {
   const url = new URL(request.url)
-  const filters: CommonFilters = {
-    from: url.searchParams.get('from'),
-    to: url.searchParams.get('to'),
-    kindCode: url.searchParams.get('kindCode'),
-    includeCanceled: url.searchParams.get('includeCanceled') ?? 'false',
-  }
+  const filters = parseCommonFilters(url)
   const where = buildEventWhere(filters)
 
   const sort = (url.searchParams.get('sort') as TeacherSortKey) || 'effectiveHours'
@@ -23,7 +18,17 @@ export async function GET(request: Request) {
   const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10))
   const pageSize = Math.max(1, Math.min(500, parseInt(url.searchParams.get('pageSize') || '50', 10)))
 
-  const result = await computeTeacherWorkloadsPaginated(where, { sort, page, pageSize, search })
+  // Optional first-level unit filter (single unit; absent = all units).
+  const unitParam = parseInt(url.searchParams.get('topLevelUnitId') || '', 10)
+  const topLevelUnitId = Number.isInteger(unitParam) && unitParam > 0 ? unitParam : undefined
+
+  const result = await computeTeacherWorkloadsPaginated(where, {
+    sort,
+    page,
+    pageSize,
+    search,
+    topLevelUnitId,
+  })
 
   return NextResponse.json({
     sort,

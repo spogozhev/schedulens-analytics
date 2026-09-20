@@ -85,11 +85,10 @@ function Footer() {
     <footer className="mt-auto border-t bg-background">
       <div className="w-full max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <div>
-          Источник данных: JSON-файлы расписания · импорт через{' '}
-          <code className="px-1 py-0.5 rounded bg-muted">bun run scripts/import-schedules.ts ./upload</code>
+          Источник данных: timetable.spbu.ru · 2025/2026 уч. год
         </div>
         <div>
-          Дедупликация времени для одновременных занятий · окончание +1 ч 30 мин по умолчанию
+          Дедупликация времени для одновременных занятий
         </div>
       </div>
     </footer>

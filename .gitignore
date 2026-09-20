@@ -1,5 +1,3 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
 # dependencies
 node_modules
 /.pnp
@@ -19,6 +17,7 @@ node_modules
 
 # production
 /build
+/dist
 
 # misc
 .DS_Store
@@ -43,6 +42,8 @@ next-env.d.ts
 local-*
 .claude
 .z-ai-config
+.zscripts
+*.bak
 *.log
 dev.log
 dev.out.log
@@ -52,3 +53,6 @@ prompt
 server.log
 # Skills directory
 /skills/
+worklog.md
+
+.vscode

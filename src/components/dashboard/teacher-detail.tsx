@@ -47,18 +47,17 @@ export function TeacherDetailDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && handleClose()}>
-      <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col gap-0 p-0">
+      <DialogContent className="sm:max-w-[800px] max-h-[90vh] overflow-hidden flex flex-col gap-0 p-0">
         <DialogHeader className="px-6 pt-6 pb-3 border-b">
           <DialogTitle className="flex items-center gap-3 text-lg">
             <GraduationCap className="h-5 w-5 text-orange-600 dark:text-orange-400" />
             {data ? data.longName : 'Загрузка…'}
           </DialogTitle>
           <DialogDescription>
-            {data ? `ID ${data.id} · ${data.isSpringTerm ? 'Весенний семестр' : 'Осенний семестр'}` : ''}
-            {data?.scheduleFrom && data?.scheduleTo && (
-              <span className="ml-2 text-muted-foreground">
-                · {new Date(data.scheduleFrom).toLocaleDateString('ru-RU')} —{' '}
-                {new Date(data.scheduleTo).toLocaleDateString('ru-RU')}
+            {data ? `ID ${data.id}` : ''}
+            {data?.employments && data.employments.length > 0 && (
+              <span className="mt-0.5 block">
+                {data.employments.map((e) => `${e.position}, ${e.department}`).join('; ')}
               </span>
             )}
           </DialogDescription>

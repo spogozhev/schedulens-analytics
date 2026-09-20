@@ -40,6 +40,16 @@ export const KIND_LABELS: Record<number, string> = {
   0: 'Индивидуальные',
   1: 'Регулярные',
   2: 'Сессия',
+  3: 'ГИА',
+}
+
+// Full labels as returned by the API (byKind) — used by the overview charts
+// (pie legend and stacked-by-month series) to match the server-side labels.
+export const KIND_LABELS_LONG: Record<number, string> = {
+  0: 'Индивидуальные мероприятия',
+  1: 'Регулярные занятия',
+  2: 'Сессия / консультации',
+  3: 'ГИА',
 }
 
 // Color per kindCode. Used by the pie chart "По типу занятий" and the

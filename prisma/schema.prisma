@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -14,30 +14,108 @@ datasource db {
 // Schedule analytics domain models
 // =====================================================
 
-/// A teacher / educator. The id is the source-system `EducatorMasterId`.
+/// A teacher / educator. The id is the source-system `EducatorMasterId`
+/// (the same educator id is used across all time periods). The full staff
+/// roster comes from the HR export (upload/staff, scripts/import-staff.ts);
+/// educators without a timetable appear in the staff list only.
+/// `topLevelUnitId` — подразделение первого уровня из файла текущих
+/// сотрудников (upload/employees.json, scripts/import-employees.ts);
+/// null = нет записи в файле или ФИО не разрешено однозначно.
 model Educator {
-  id           Int       @id
-  displayName  String
-  longName     String
-  scheduleFrom DateTime?
-  scheduleTo   DateTime?
-  isSpringTerm Boolean    @default(true)
+  id          Int    @id
+  displayName String
+  longName    String
+
+  topLevelUnitId Int?
+  topLevelUnit   TopLevelUnit? @relation(fields: [topLevelUnitId], references: [id])
 
   events           ScheduleEvent[]          @relation("PrimaryEducatorEvents")
+  employments      Employment[]
+  employeeMatches  EmployeeMatch[]
 
-  @@index([scheduleFrom, scheduleTo])
+  @@index([topLevelUnitId])
+}
+
+/// Подразделение первого уровня (институт / факультет).
+model TopLevelUnit {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+
+  educators Educator[]
+
+  @@index([name])
+}
+
+/// Сопоставление записи из upload/employees.json (стабильный id кадровой
+/// системы) с преподавателем, установленное скриптом import-employees.ts
+/// по ФИО + пересечению должностей. score — вес совпадения должностей.
+model EmployeeMatch {
+  fileId     String   @id
+  educatorId Int
+  educator   Educator @relation(fields: [educatorId], references: [id], onDelete: Cascade)
+  score      Int
+
+  @@index([educatorId])
+}
+
+/// Должность преподавателя (Position) в подразделении (Department) —
+/// одна строка кадровой выгрузки. У преподавателя может быть несколько
+/// должностей. departmentId NULL — подразделение в выгрузке не указано.
+model Employment {
+  id           Int    @id @default(autoincrement())
+  educatorId   Int
+  educator     Educator @relation(fields: [educatorId], references: [id], onDelete: Cascade)
+  position     String
+  departmentId Int?
+  department   Department? @relation(fields: [departmentId], references: [id])
+
+  @@unique([educatorId, position, departmentId])
+  @@index([educatorId])
+  @@index([position])
+  @@index([departmentId])
+}
+
+/// Подразделение (кафедра, факультет, …) из кадровой выгрузки —
+/// справочник для фильтра преподавателей по подразделению.
+model Department {
+  id          Int    @id @default(autoincrement())
+  name        String @unique
+
+  employments Employment[]
+
+  @@index([name])
+}
+
+/// A physical address ("<Улица>, д. <дом>") parsed from the location display
+/// name at import time. Several locations (auditoriums) share one address.
+model Address {
+  id          Int    @id @default(autoincrement())
+  displayName String @unique
+
+  locations Location[]
+
+  @@index([displayName])
 }
 
 /// A classroom / physical location. Unique by `displayName`.
+/// `displayName` keeps the full source text:
+/// "<Улица>, д. <дом>[, лит. X][, пом. Y], <номер аудитории>".
 model Location {
   id          Int    @id @default(autoincrement())
   displayName String @unique
   latitude    Float?
   longitude   Float?
 
-  events ScheduleEventLocation[]
+  // Parsed address part ("<Улица>, д. <дом>"); null for virtual locations
+  // without an address (e.g. "по месту проведения практики").
+  addressId Int?
+  address   Address? @relation(fields: [addressId], references: [id])
+
+  events        ScheduleEventLocation[]
+  primaryEvents ScheduleEvent[]         @relation("PrimaryLocation")
 
   @@index([displayName])
+  @@index([addressId])
 }
 
 /// A subject. Unique by name.
@@ -54,6 +132,30 @@ model Group {
   id    Int    @id @default(autoincrement())
   name  String @unique
   events ScheduleEventGroup[]
+
+  @@index([name])
+}
+
+/// A schedule term period (two per year), imported from the schedule file:
+/// `DateRangeDisplayText` + the period bounds from the file's From/To.
+model DateRange {
+  id          Int      @id @default(autoincrement())
+  displayText String   @unique
+  dateFrom    DateTime
+  dateTo      DateTime
+
+  events ScheduleEvent[]
+
+  @@index([dateFrom, dateTo])
+}
+
+/// A lesson form (лекция, экзамен, зачёт, …) parsed from the tail of the
+/// event's Subject text after the last comma. See scripts/lesson-forms.ts.
+model LessonForm {
+  id     Int    @id @default(autoincrement())
+  name   String @unique
+
+  events ScheduleEvent[]
 
   @@index([name])
 }
@@ -107,6 +209,25 @@ model ScheduleEvent {
   // dedupe room utilization (one physical lecture = one utilization slot).
   lectureHash String
 
+  // Denormalized PRIMARY location (the first of the event's locations, by
+  // ascending locationId). Room analytics read this column directly instead
+  // of joining through ScheduleEventLocation; `locations` below holds only
+  // the ADDITIONAL locations beyond the primary. Nullable for backward
+  // compatibility with rows created before the migration.
+  locationId Int?
+  location   Location? @relation("PrimaryLocation", fields: [locationId], references: [id])
+
+  // The schedule term period (DateRangeDisplayText + From/To of the imported
+  // file). Null for rows imported before this field existed — a re-import
+  // fills it in.
+  dateRangeId Int?
+  dateRange   DateRange? @relation(fields: [dateRangeId], references: [id])
+
+  // Lesson form parsed from the Subject tail (e.g. "…, лекция"). Null when
+  // the subject carries no recognized form.
+  lessonFormId Int?
+  lessonForm   LessonForm? @relation(fields: [lessonFormId], references: [id])
+
   // Relations
   locations     ScheduleEventLocation[]
   groups        ScheduleEventGroup[]
@@ -120,6 +241,10 @@ model ScheduleEvent {
   @@index([globalEventHash])
   @@index([lectureHash])
   @@index([kindCode])
+  // Room analytics (workloads, KPI room count) group by this column.
+  @@index([locationId])
+  @@index([dateRangeId])
+  @@index([lessonFormId])
 }
 
 model ScheduleEventLocation {
@@ -127,6 +252,10 @@ model ScheduleEventLocation {
   locationId Int
   event      ScheduleEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
   location   Location      @relation(fields: [locationId], references: [id])
+
+  // Holds only the ADDITIONAL locations of an event — the primary one is
+  // denormalized into ScheduleEvent.locationId (see migration
+  // scripts/migrate-primary-location.ts).
 
   @@id([eventId, locationId])
   @@index([locationId])

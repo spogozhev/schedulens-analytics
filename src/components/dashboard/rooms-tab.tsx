@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { AlertTriangle, Search } from 'lucide-react'
+import { AlertTriangle, MapPin, Search } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -22,10 +22,11 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { MiniBar } from './charts'
+import { MultiSelectFilter } from './multi-select-filter'
 import { PaginationFooter, useDebouncedValue } from './pagination-footer'
 import { formatHours, formatNumber } from './palette'
 import { useDashboardStore, buildFilterQuery } from '@/lib/dashboard-store'
-import { useRooms } from '@/lib/api-hooks'
+import { useAddresses, useRooms } from '@/lib/api-hooks'
 import type { RoomSortKey } from '@/lib/analytics'
 
 export function RoomsTab() {
@@ -36,10 +37,18 @@ export function RoomsTab() {
   const [pageSize, setPageSize] = React.useState(25)
   const [searchInput, setSearchInput] = React.useState('')
   const search = useDebouncedValue(searchInput, 300)
+  const [addressIds, setAddressIds] = React.useState<number[]>([])
+  const { data: addressesMeta } = useAddresses()
+  const addressOptions = (addressesMeta?.addresses ?? []).map((a) => ({
+    id: a.id,
+    label: a.displayName,
+    hint: `${formatNumber(a.roomCount)} аудиторий`,
+  }))
 
-  React.useEffect(() => setPage(1), [filters, sort, search, pageSize])
+  React.useEffect(() => setPage(1), [filters, sort, search, pageSize, addressIds])
 
-  const query = buildFilterQuery(filters)
+  const baseQuery = buildFilterQuery(filters)
+  const query = addressIds.length > 0 ? `${baseQuery}&addressIds=${addressIds.join(',')}` : baseQuery
   const { data, isLoading, error, isFetching } = useRooms(query, { page, pageSize, sort, search })
 
   const items = (data?.items ?? []) as Array<{
@@ -66,6 +75,19 @@ export function RoomsTab() {
     <div className="space-y-4">
       <Card>
         <CardContent className="py-3 flex flex-wrap items-end gap-3">
+          <MultiSelectFilter
+            label="Адрес"
+            icon={<MapPin className="h-4 w-4" />}
+            options={addressOptions}
+            selectedIds={addressIds}
+            onChange={(ids) => {
+              setAddressIds(ids)
+              setPage(1)
+            }}
+            allLabel="Все адреса"
+            width="w-[280px]"
+          />
+
           <div className="flex flex-col gap-1.5">
             <span className="text-xs text-muted-foreground">Сортировка</span>
             <Select value={sort} onValueChange={(v) => setSort(v as RoomSortKey)}>
@@ -120,7 +142,9 @@ export function RoomsTab() {
             <div className="text-destructive text-sm">Ошибка: {String(error.message)}</div>
           ) : items.length === 0 ? (
             <div className="text-sm text-muted-foreground py-8 text-center">
-              {search ? `Ничего не найдено по запросу «${search}»` : 'Нет данных'}
+              {search || addressIds.length
+                ? 'Ничего не найдено — измените поиск или выбор адреса'
+                : 'Нет данных'}
             </div>
           ) : (
             <div className="rounded-md border border-border/60 overflow-hidden">

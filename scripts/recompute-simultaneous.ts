@@ -17,9 +17,11 @@
  */
 
 import { db } from '../src/lib/db'
+import { isSqlite } from '../src/lib/sql-dialect'
 import type { Prisma } from '@prisma/client'
 
 async function setupPragmas(): Promise<void> {
+  if (!isSqlite) return // PostgreSQL needs no client-side tuning
   // See import-schedules.ts for rationale. We deliberately DO NOT set
   // `locking_mode = EXCLUSIVE` because it can leave a stale WAL lock on
   // re-runs (the second invocation blocks until socket timeout).

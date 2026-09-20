@@ -1,9 +1,7 @@
 'use client'
 
-import * as React from 'react'
-import { CalendarRange, Filter, RotateCcw } from 'lucide-react'
+import { BookOpen, CalendarRange, Filter, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -13,64 +11,52 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover'
 import { Separator } from '@/components/ui/separator'
+import { MultiSelectFilter } from './multi-select-filter'
 import { useDashboardStore } from '@/lib/dashboard-store'
+import { useMeta } from '@/lib/api-hooks'
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('ru-RU', { timeZone: 'UTC' })
+}
 
 export function FiltersBar() {
-  const { filters, setFilter, resetFilters, setRange } = useDashboardStore()
-  const [open, setOpen] = React.useState(false)
+  const filters = useDashboardStore((s) => s.filters)
+  const setFilter = useDashboardStore((s) => s.setFilter)
+  const resetFilters = useDashboardStore((s) => s.resetFilters)
+  const setDateRanges = useDashboardStore((s) => s.setDateRanges)
+  const { data: meta } = useMeta()
+  const dateRanges = meta?.dateRanges ?? []
+  const lessonForms = meta?.lessonForms ?? []
 
-  const setPreset = (preset: 'all' | 'term' | 'month' | 'week') => {
-    const now = new Date()
-    if (preset === 'all') {
-      setRange(null, null)
-    } else if (preset === 'term') {
-      // Spring term: Feb 1 - Aug 1
-      setRange('2026-02-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')
-    } else if (preset === 'month') {
-      const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-      const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59))
-      setRange(from.toISOString(), to.toISOString())
-    } else if (preset === 'week') {
-      const now2 = new Date()
-      const day = (now2.getUTCDay() + 6) % 7 // 0=Mon
-      const from = new Date(Date.UTC(now2.getUTCFullYear(), now2.getUTCMonth(), now2.getUTCDate() - day))
-      const to = new Date(from.getTime() + 7 * 86_400_000 - 1)
-      setRange(from.toISOString(), to.toISOString())
-    }
-  }
+  const selectedPeriods = filters.dateRangeIds
+  const selectedForms = filters.lessonFormIds
 
   return (
     <div className="flex flex-wrap items-end gap-3">
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-xs text-muted-foreground">Период с</Label>
-        <Input
-          type="date"
-          value={filters.from ? filters.from.slice(0, 10) : ''}
-          onChange={(e) => {
-            const v = e.target.value
-            setRange(v ? new Date(v + 'T00:00:00.000Z').toISOString() : null, filters.to)
-          }}
-          className="w-[150px]"
-        />
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-xs text-muted-foreground">Период по</Label>
-        <Input
-          type="date"
-          value={filters.to ? filters.to.slice(0, 10) : ''}
-          onChange={(e) => {
-            const v = e.target.value
-            setRange(filters.from, v ? new Date(v + 'T23:59:59.999Z').toISOString() : null)
-          }}
-          className="w-[150px]"
-        />
-      </div>
+      <MultiSelectFilter
+        label="Период (семестр)"
+        icon={<CalendarRange className="h-4 w-4" />}
+        options={dateRanges.map((r) => ({
+          id: r.id,
+          label: r.displayText,
+          hint: `${formatDate(r.dateFrom)} — ${formatDate(r.dateTo)}`,
+        }))}
+        selectedIds={selectedPeriods}
+        onChange={setDateRanges}
+        allLabel="Все периоды"
+        width="w-[260px]"
+      />
+
+      <MultiSelectFilter
+        label="Форма занятия"
+        icon={<BookOpen className="h-4 w-4" />}
+        options={lessonForms.map((f) => ({ id: f.id, label: f.name }))}
+        selectedIds={selectedForms}
+        onChange={(ids) => setFilter('lessonFormIds', ids)}
+        allLabel="Все формы"
+        width="w-[200px]"
+      />
 
       <div className="flex flex-col gap-1.5">
         <Label className="text-xs text-muted-foreground">Тип занятий</Label>
@@ -117,31 +103,6 @@ export function FiltersBar() {
         </Label>
       </div>
 
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>
-          <Button variant="outline" size="sm" className="h-9">
-            <CalendarRange className="mr-2 h-4 w-4" />
-            Быстрый период
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent className="w-56" align="start">
-          <div className="grid gap-2">
-            <Button variant="ghost" size="sm" onClick={() => { setPreset('all'); setOpen(false) }}>
-              Всё время
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => { setPreset('term'); setOpen(false) }}>
-              Семестр (фев–авг)
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => { setPreset('month'); setOpen(false) }}>
-              Текущий месяц
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => { setPreset('week'); setOpen(false) }}>
-              Текущая неделя
-            </Button>
-          </div>
-        </PopoverContent>
-      </Popover>
-
       <Button
         variant="ghost"
         size="sm"
@@ -156,9 +117,9 @@ export function FiltersBar() {
       <Separator orientation="vertical" className="hidden sm:block h-9" />
       <div className="hidden sm:flex items-center gap-2 text-xs text-muted-foreground">
         <Filter className="h-3.5 w-3.5" />
-        {filters.from || filters.to
-          ? `Фильтр: ${filters.from ? new Date(filters.from).toLocaleDateString('ru-RU') : '...'} — ${filters.to ? new Date(filters.to).toLocaleDateString('ru-RU') : '...'}`
-          : 'Без ограничения по датам'}
+        {selectedPeriods.length === 0 && selectedForms.length === 0
+          ? 'Без ограничения по периоду и форме'
+          : `Фильтров выбрано: ${selectedPeriods.length + selectedForms.length}`}
       </div>
     </div>
   )

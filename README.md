@@ -1,25 +1,49 @@
 # Аналитика расписания преподавателей
 
-Веб-сервис для анализа загруженности преподавателей и аудиторий на основе JSON-файлов
-расписания. Скрипт-импортёр объединяет 1000+ файлов в единую базу данных, а дашборд
-предоставляет рейтинги, графики и тепловые карты с учётом **одновременных занятий**
-(когда преподаватель ведёт несколько групп в одно время).
+Веб-сервис для анализа загруженности преподавателей и аудиторий СПбГУ на основе
+JSON-файлов расписания и кадровой выгрузки. Дашборд предоставляет KPI, рейтинги,
+графики и тепловые карты с учётом **одновременных занятий** (когда преподаватель
+ведёт несколько групп в одно время) и **дедупликации совместных лекций**
+(когда одну лекцию ведут несколько преподавателей).
 
 ---
 
 ## Возможности
 
-- **Импорт расписания** из JSON-файлов (включая подпапки) в SQLite через Prisma.
+### Данные и импорт
+- **Импорт расписаний** из JSON-файлов (папка `upload/timetable`, обход рекурсивный)
+  в SQLite через Prisma.
 - **Парсинг русских дат**: одиночные `"2.6"` и диапазоны `"с 17.2 по 19.5 (14)"`.
-- **Учёт одновременных занятий**: события преподавателя с пересекающимися интервалами
-  группируются, время учитывается только один раз (эффективная нагрузка).
-- **Дедупликация по лекции**: одна физическая лекция для нескольких групп
-  считается как один слот утилизации аудитории.
+- **Периоды (семестры)**: `DateRangeDisplayText` + `From`/`To` файла сохраняются в
+  справочник `DateRange`, каждое событие ссылается на свой период.
+- **Формы занятий**: из хвоста названия предмета («…, лекция») извлекается форма
+  (белый список из 29 форм) → справочник `LessonForm`, событие ссылается на форму.
+- **Адреса аудиторий**: из названия аудитории парсится адрес («<Улица>, д. <дом>»)
+  → справочник `Address`, аудитория ссылается на адрес.
+- **Кадровый состав**: `upload/staff/*.json` — полный штат и должности
+  (`Position` + `Department`) → справочник `Department` и таблица `Employment`.
+- **Текущие сотрудники**: `upload/employees.json` — привязка преподавателей к
+  подразделениям первого уровня (`TopLevelUnit`) по ФИО с разрешением дублей
+  по пересечению должностей.
+- **Учёт одновременных занятий**: события преподавателя с пересекающимися
+  интервалами группируются (`simultaneousGroupId`), время учитывается один раз
+  (эффективная нагрузка).
+- **Дедупликация по лекции**: одна физическая лекция (несколько групп,
+  несколько со-преподавателей) считается одним слотом утилизации аудитории.
 - **Окончание +1 ч 30 мин** по умолчанию, если в источнике не указано `End`.
-- **Фильтры по периоду, типу занятий,Granularity; показ/скрытие отменённых.
-- **Рейтинги преподавателей и аудиторий** с сортировкой и поиском.
-- **Детальные диалоги** с KPI, графиками, тепловыми картами, списком занятий.
-- **Тёмная/светлая тема**, адаптивный дизайн (мобильный/десктоп).
+
+### Дашборд
+- **Обзор**: KPI-карточки, баннер одновременных занятий, динамика по неделям/дням,
+  распределения по типам и формам занятий, по месяцам × типам (stacked),
+  топ-10 преподавателей и аудиторий, тепловая карта «день × час».
+- **Преподаватели**: рейтинг с фильтром по подразделению первого уровня
+  (выпадающий список), поиском, сортировками и пагинацией.
+- **Аудитории**: рейтинг с мультивыбором адресов, поиском, сортировками, пагинацией.
+- **Диалоги деталей** (800px): KPI, должности преподавателя, графики,
+  конфликты, последние занятия.
+- **Фильтры**: периоды (мультивыбор из `DateRange`), формы занятий (мультивыбор),
+  тип занятий, показ/скрытие отменённых.
+- **Тёмная/светлая тема**, адаптивный дизайн.
 
 ---
 
@@ -42,8 +66,6 @@
 ## Предварительные требования
 
 - **Bun ≥ 1.3** — пакетный менеджер и runtime ([установка](https://bun.sh/docs/installation))
-- **Node.js ≥ 20** (опционально, нужен только если не используется Bun)
-- ОС: Linux / macOS / Windows (WSL рекомендуется)
 
 Проверка:
 
@@ -62,139 +84,132 @@ bun install
 # 2. Применить схему базы данных (создаст SQLite в db/custom.db)
 bun run db:push
 
-# 3. Импортировать JSON-файлы расписания из папки ./upload
-bun run scripts/import-schedules.ts ./upload
+# 3. Импортировать данные (расписания — из ./upload/timetable)
+bun run scripts/import-schedules.ts ./upload/timetable
 
 # 4. Запустить dev-сервер (порт 3000)
 bun run dev
 ```
 
-Откройте дашборд в **Preview Panel** справа в интерфейсе IDE или по адресу
-`http://localhost:3000` (в локальной разработке).
+---
+
+## Выбор СУБД: SQLite или PostgreSQL
+
+Поддерживаются обе СУБД; вариант выбирается при развертывании через `DATABASE_URL`.
+Весь код приложения (включая raw-SQL аналитику) работает с обоими диалектами —
+диалект определяется автоматически по протоколу строки подключения.
+
+### Вариант SQLite (по умолчанию)
+
+```env
+DATABASE_URL=file:/путь/к/db/custom.db
+```
+
+```bash
+bun run scripts/use-db.ts sqlite   # ставит provider = "sqlite" в schema.prisma
+bun run db:generate
+bun run db:push
+```
+
+### Вариант PostgreSQL
+
+```env
+DATABASE_URL=postgresql://user:password@host:5432/analytics?schema=public
+```
+
+```bash
+bun run scripts/use-db.ts postgres   # ставит provider = "postgresql"
+bun run db:generate                  # обязателен после смены провайдера!
+bun run db:push
+```
+
+### Заполнение данными (одинаково для обеих СУБД)
+
+```bash
+bun run scripts/import-schedules.ts ./upload/timetable
+bun run scripts/import-staff.ts ./upload/staff
+bun run scripts/import-employees.ts ./upload/employees.json
+```
+
+> ⚠️ Данные между СУБД не переносятся автоматически: на новой СУБД запустите
+> импортеры заново (они полностью восстанавливают состояние из исходных JSON).
+> Переключение провайдера требует `db:generate` — перезапустите dev/production
+> сервер после переключения.
+
+Особенности SQLite-режима: `connection_limit=1` и `PRAGMA cache_size/temp_store`
+(включаются автоматически в `src/lib/db.ts`); для PostgreSQL тюнинг делается на
+стороне сервера (`shared_buffers`, `work_mem`).
 
 ---
 
-## Развёртывание
+## Структура исходных данных
 
-### Шаг 1. Клонирование и установка
+```
+upload/
+├── timetable/        # JSON-файлы расписаний преподавателей
+│   └── 1059.json …
+├── staff/            # кадровая выгрузка (файлы по первой букве фамилии)
+│   └── А.json …
+└── employees.json    # текущие сотрудники (подразделения 1-го уровня)
+```
+
+---
+
+## Скрипты импорта
+
+### `scripts/import-schedules.ts` — расписания
 
 ```bash
-git clone <repo-url>
-cd <project-dir>
-bun install
+bun run scripts/import-schedules.ts [директория]   # по умолчанию ./upload/timetable
 ```
 
-### Шаг 2. Настройка переменных окружения
+- парсит даты `"D.M"` и диапазоны `"с D.M по D.M (N)"`; год определяется по
+  терминальному диапазону файла (`From`/`To`) с проверкой дня недели;
+- создаёт/находит справочники: `DateRange` (период файла), `LessonForm`
+  (форма занятия из хвоста `Subject`), `Address` (адрес из названия аудитории);
+- если `End` не задан — `Start + 90 минут`, `hasInferredEnd = true`;
+- денормализует **основную аудиторию** события (`ScheduleEvent.locationId`);
+  дополнительные аудитории — в `ScheduleEventLocation`;
+- вычисляет **одновременные группы** (sweep-line) и помечает `simultaneousGroupId`;
+- **не очищает базу**: дубликаты детектируются по составному ключу
+  `(educatorId, startDateTime, subjectId, globalEventHash)`; пропущенные
+  «легаси»-строки обогащаются `dateRangeId` / `lessonFormId`.
 
-Создайте файл `.env` в корне проекта:
-
-```env
-# Путь к SQLite-файлу (абсолютный или относительный)
-DATABASE_URL=file:/home/z/my-project/db/custom.db
-```
-
-> При необходимости можно заменить на PostgreSQL/MySQL — для этого отредактируйте
-> `prisma/schema.prisma` (поле `provider` в `datasource db`) и замените `DATABASE_URL`.
-
-### Шаг 3. Инициализация базы данных
+### `scripts/import-staff.ts` — штат и должности
 
 ```bash
-# Сгенерировать Prisma-клиент и применить схему
-bun run db:push
-
-# (опционально) Сбросить базу с потерей данных
-bun run db:push --force-reset
+bun run scripts/import-staff.ts [директория]   # по умолчанию ./upload/staff
 ```
 
-Создаётся файл `db/custom.db` со следующими таблицами:
+- upsert `Educator` по `Id` (`DisplayName` → displayName, `FullName` → longName);
+  преподаватели без расписаний тоже попадают в базу (полный штат);
+- должности (`Position` + `Department`) заменяются содержимым выгрузки,
+  название подразделения резолвится в справочник `Department`.
 
-- `Educator` — преподаватели (id = `EducatorMasterId` из источника)
-- `Location` — аудитории (уникальны по `displayName`, с координатами)
-- `Subject` — дисциплины
-- `Group` — учебные потоки / группы
-- `ScheduleEvent` — события расписания (одна строка = один преподаватель × один слот)
-- `ScheduleEventLocation`, `ScheduleEventEducator`, `ScheduleEventGroup` — связи M:N
-
-### Шаг 4. Импорт данных
-
-Положите все JSON-файлы расписания в одну директорию (можно с подпапками — обход
-рекурсивный). Формат файла — стандартный экспорт портала расписания СПбГУ с полями
-`EducatorMasterId`, `From`, `To`, `EducatorEventsDays[].DayStudyEvents[]`.
+### `scripts/import-employees.ts` — текущие сотрудники
 
 ```bash
-bun run scripts/import-schedules.ts /путь/к/папке/с/json
+bun run scripts/import-employees.ts [файл]   # по умолчанию ./upload/employees.json
 ```
 
-Скрипт:
-- обходит директорию рекурсивно (поддержка 1000+ файлов);
-- парсит даты `"D.M"` и диапазоны `"с D.M по D.M (N)"`;
-- выводит год из терминального диапазона файла (`From`/`To`) и проверяет
-  соответствие дню недели, указанному в поле `Day`;
-- если `End` не задан — устанавливает `Start + 90 минут` и помечает
-  `hasInferredEnd = true`;
-- для каждого преподавателя вычисляет **одновременные группы** (sweep-line по
-  пересечению интервалов) и помечает `simultaneousGroupId`;
-- **не очищает базу данных** перед импортом — существующие записи
-  сохраняются, новые добавляются к ним. Дубликаты детектируются через
-  `findFirst` по составному ключу `(educatorId, startDateTime, subjectId,
-  globalEventHash)` перед каждым `create()` — повторный запуск того же
-  файла не создаёт дубликатов;
-- перед импортом предзагружает существующие субъекты/локации/группы/
-  преподаватели в кэш (`preloadCaches`), чтобы не делать upsert для уже
-  известных сущностей — это сохраняет скорость при повторных запусках.
+- сопоставляет сотрудников с преподавателями по нормализованному ФИО
+  (нижний регистр, ё→е, схлопнутые пробелы);
+- для одинаковых ФИО — бипартитное назначение по пересечению должностей
+  (+10 за совпадение Position и `second_level_unit`, +1 за Position);
+  назначение принимается только при уникальном ненулевом максимуме;
+- создаёт словарь `TopLevelUnit` и проставляет `Educator.topLevelUnitId`;
+- записи «файл → преподаватель» сохраняются в `EmployeeMatch` (идемпотентность).
 
-**Типичные сценарии:**
+> ⚠️ Импорты **не очищают базу**. Повторный запуск того же файла пропускает
+> дубликаты (и дозаполняет новые поля). Для полной очистки —
+> `bun run db:push --force-reset` с потерей данных.
 
-| Сценарий | Команда | Результат |
-|----------|---------|-----------|
-| Первый импорт | `bun run scripts/import-schedules.ts ./upload` | Все события добавляются в пустую БД |
-| Добавить новых преподавателей позже | Положить новые JSON-файлы в `./upload`, повторно запустить | Новые преподаватели добавятся; существующие события пропустятся (дубликаты) |
-| Полный реимпорт (если данные изменились) | `bun run db:push --force-reset` → повторный импорт | БД очищается и пересоздаётся заново |
+### Разовые миграции данных
 
-> ⚠️ При повторном импорте того же файла (без изменений) все события
-> пропустятся как дубликаты. Чтобы принудительно обновить изменённые
-> события, используйте `bun run db:push --force-reset` для полной очистки
-> БД перед реимпортом.
-
-**Пример вывода:**
-
-```
-Importing schedules from: ./upload
-Found 5 JSON file(s).
-  Processed 5/5 files, 1980 events so far.
-Imported 1980 events from 5 file(s) (0 failed).
-Computing simultaneous groups...
-Simultaneous: 5 teachers, 309 groups, 1362 events flagged.
---- Summary ---
-Teachers: 5
-Events: 1980
-Locations: 54
-Subjects: 255
-Groups: 163
-  Kind 0 (Индивидуальные мероприятия): 29
-  Kind 1 (Регулярные занятия): 1565
-  Kind 2 (Сессия / консультации): 386
-```
-
-### Шаг 5. Запуск
-
-#### Режим разработки
-
-```bash
-bun run dev
-```
-
-Dev-сервер слушает порт **3000**, поддерживает hot-reload. Лог пишется в `dev.log`.
-
-#### Продакшен-сборка
-
-```bash
-# Собрать standalone-бандл в .next/standalone/
-bun run build
-
-# Запустить продакшен-сервер (порт 3000)
-bun run start
-```
+Скрипты `migrate-primary-location.ts`, `migrate-lesson-forms.ts`,
+`migrate-departments.ts`, `migrate-addresses.ts` заполняли денормализованные
+поля на старых наборах данных. На свежей базе после полного импорта они
+**не требуются** — импортёры заполняют эти поля сами.
 
 ---
 
@@ -206,37 +221,54 @@ bun run start
 | `bun run build` | Продакшен-сборка standalone-бандла |
 | `bun run start` | Запуск продакшен-сервера |
 | `bun run lint` | Проверка ESLint |
-| `bun run db:push` | Применить схему Prisma к SQLite (с потерей при конфликтах) |
+| `bun run db:push` | Применить схему Prisma к SQLite |
 | `bun run db:generate` | Перегенерировать Prisma-клиент |
 | `bun run db:migrate` | Создать и применить миграцию |
 | `bun run db:reset` | Полный сброс базы (миграции) |
-
-Запуск скрипта импорта:
-
-```bash
-bun run scripts/import-schedules.ts [директория]
-# по умолчанию: ./upload
-```
+| `bun run db:schema` | Экспорт структуры БД с ER-диаграммой в `db_schema.md` |
 
 ### Пересчёт одновременных групп без реимпорта
-
-Если вы изменили правило группировки одновременных занятий (например,
-правило обработки back-to-back событий — когда конец одного занятия
-совпадает с началом следующего), можно пересчитать `simultaneousGroupId`
-во всей базе без повторного парсинга JSON-файлов:
 
 ```bash
 bun run scripts/recompute-simultaneous.ts
 ```
 
-Скрипт:
-- сбрасывает все `simultaneousGroupId` в `null`;
-- для каждого преподавателя заново прогоняет sweep-line алгоритм со строгим
-  правилом пересечения (`b.start < a.maxEnd` — back-to-back события
-  `a.end === b.start` не объединяются);
-- идемпотентен — повторный запуск даёт тот же результат.
+Сбрасывает `simultaneousGroupId` и заново прогоняет sweep-line по каждому
+преподавателю (строгое пересечение: back-to-back не объединяются).
+Идемпотентен и намного быстрее полного реимпорта.
 
-Это в десятки раз быстрее, чем полный реимпорт 5000+ JSON-файлов.
+### Проверка ответов API (golden-файлы)
+
+`scripts/golden-save.ts` сохраняет ответы всех эндпоинтов в JSON, а
+`scripts/golden-check.ts` сверяет их после рефакторингов — полезно при
+изменении запросов или схемы:
+
+```bash
+DATABASE_URL="file:<abs path>" GOLDEN_DIR=/tmp/golden DB_LOG_SLOW_MS=-1 bun scripts/golden-save.ts
+DATABASE_URL="file:<abs path>" GOLDEN_DIR=/tmp/golden DB_LOG_SLOW_MS=-1 bun scripts/golden-check.ts
+```
+
+### Экспорт схемы БД
+
+```bash
+bun run db:schema   # → db_schema.md (Mermaid ER-диаграмма + описание таблиц)
+```
+
+---
+
+## Производительность и логирование
+
+- Тяжёлые агрегации дашборда выполняются **raw SQL с GROUP BY** (не загрузкой
+  строк в JS) — см. `src/lib/analytics.ts`;
+- `src/lib/db.ts` использует `connection_limit=1` и `PRAGMA cache_size = 128МБ`
+  + `temp_store = MEMORY` (для SQLite это даёт ~4× на join'ах);
+- **логирование выключено по умолчанию**; для диагностики включается
+  переменными окружения:
+
+| Переменная | Значение | Что делает |
+|---|---|---|
+| `DB_LOG_SLOW_MS` | `0` — все SQL-запросы, `200` — только >200мс, `-1`/не задано — выключено | лог `[db   12ms] SELECT …` |
+| `ANALYTICS_LOG_SLOW_MS` | аналогично | лог шагов `[t   123ms] kpi:sql-agg` |
 
 ---
 
@@ -245,49 +277,65 @@ bun run scripts/recompute-simultaneous.ts
 ```
 .
 ├── prisma/
-│   └── schema.prisma              # схема БД
+│   └── schema.prisma                # схема БД (14 таблиц)
 ├── db/
-│   └── custom.db                  # SQLite (создаётся автоматически)
-├── upload/                        # исходные JSON-файлы (ваш набор)
+│   └── custom.db                    # SQLite (создаётся автоматически)
+├── upload/
+│   ├── timetable/                   # JSON расписаний преподавателей
+│   ├── staff/                       # кадровая выгрузка (по буквам)
+│   └── employees.json               # текущие сотрудники
 ├── scripts/
-│   ├── import-schedules.ts        # импорт + расчёт одновременных групп
-│   └── recompute-simultaneous.ts   # пересчёт одновременных групп без реимпорта
+│   ├── import-schedules.ts          # импорт расписаний (+ периоды, формы, адреса)
+│   ├── import-staff.ts              # штат и должности
+│   ├── import-employees.ts          # текущие сотрудники → подразделения 1-го уровня
+│   ├── lesson-forms.ts              # словарь форм занятий + парсер
+│   ├── address-parse.ts             # парсер адреса из названия аудитории
+│   ├── migrate-*.ts                 # разовые миграции данных (уже применены)
+│   ├── recompute-simultaneous.ts    # пересчёт одновременных групп
+│   ├── export-schema.ts             # экспорт схемы в db_schema.md
+│   └── golden-save.ts / golden-check.ts  # регрессионная проверка ответов API
 ├── src/
 │   ├── app/
-│   │   ├── layout.tsx             # корневой layout (ThemeProvider, QueryProvider)
-│   │   ├── page.tsx               # единственная страница — Dashboard
-│   │   ├── globals.css            # Tailwind + custom-scrollbar
-│   │   └── api/
-│   │       └── analytics/
-│   │           ├── overview/      # KPI, топ-преподаватели/аудитории, by-kind
-│   │           ├── teachers/      # рейтинг преподавателей (sort, top-N, search)
-│   │           ├── rooms/         # рейтинг аудиторий (sort, top-N, search)
-│   │           ├── timeline/      # ведра по неделям/дням, heatmap 7×24
-│   │           ├── teacher/[id]/  # детали преподавателя
-│   │           └── room/[id]/     # детали аудитории
+│   │   ├── layout.tsx               # корневой layout (ThemeProvider, QueryProvider)
+│   │   ├── page.tsx                 # единственная страница — Dashboard
+│   │   └── api/analytics/
+│   │       ├── kpi/                 # KPI-итоги
+│   │       ├── by-kind/             # распределение по типам занятий
+│   │       ├── by-lesson-form/      # распределение по формам занятий
+│   │       ├── by-month-by-kind/    # события по месяцам × типам
+│   │       ├── timeline/            # бакеты по неделям/дням
+│   │       ├── heatmap/             # тепловая карта 7×24
+│   │       ├── top-teachers/        # топ преподавателей
+│   │       ├── top-rooms/           # топ аудиторий
+│   │       ├── teachers/            # список преподавателей (фильтры, пагинация)
+│   │       ├── rooms/               # список аудиторий (фильтры, пагинация)
+│   │       ├── teacher/[id]/        # детали преподавателя (вкл. должности)
+│   │       ├── room/[id]/           # детали аудитории
+│   │       ├── meta/                # периоды, типы, формы (опции фильтров)
+│   │       ├── addresses/           # справочник адресов
+│   │       └── top-level-units/     # подразделения 1-го уровня
 │   ├── components/
-│   │   ├── ui/                    # shadcn/ui компоненты (уже установлены)
+│   │   ├── ui/                      # shadcn/ui компоненты
 │   │   └── dashboard/
-│   │       ├── dashboard.tsx      # главный shell (хедер + табы + футер)
-│   │       ├── filters-bar.tsx    # фильтры (даты, тип, granularity, пресеты)
-│   │       ├── overview-tab.tsx   # обзор: KPI + графики + heatmap
-│   │       ├── teachers-tab.tsx   # таблица рейтинга преподавателей
-│   │       ├── rooms-tab.tsx      # таблица рейтинга аудиторий
-│   │       ├── teacher-detail.tsx # диалог деталей преподавателя
-│   │       ├── room-detail.tsx    # диалог деталей аудитории
-│   │       ├── charts.tsx         # LineChart, AreaChart, BarChart, Pie, Heatmap
-│   │       ├── kpi-card.tsx       # карточка KPI с цветным акцентом
-│   │       ├── palette.ts         # палитра без индиго/синего
-│   │       ├── theme-provider.tsx  # обёртка next-themes
-│   │       ├── theme-toggle.tsx   # переключатель тёмной/светлой темы
-│   │       └── query-provider.tsx # обёртка TanStack Query
+│   │       ├── dashboard.tsx        # shell (хедер + табы + футер)
+│   │       ├── filters-bar.tsx      # периоды, формы, тип, отменённые
+│   │       ├── multi-select-filter.tsx  # общий мультивыбор (периоды/формы/адреса)
+│   │       ├── overview-tab.tsx     # KPI + графики + heatmap
+│   │       ├── teachers-tab.tsx     # рейтинг преподавателей (+ фильтр подразделения)
+│   │       ├── rooms-tab.tsx        # рейтинг аудиторий (+ фильтр адреса)
+│   │       ├── teacher-detail.tsx   # диалог преподавателя (должности, KPI, графики)
+│   │       ├── room-detail.tsx      # диалог аудитории
+│   │       ├── charts.tsx           # AreaChart, BarChart (в т.ч. horizontal), Pie, Heatmap
+│   │       ├── kpi-card.tsx         # карточка KPI
+│   │       └── palette.ts           # палитра и подписи
 │   └── lib/
-│       ├── db.ts                  # экземпляр PrismaClient
-│       ├── analytics.ts           # computeTeacherWorkloads, computeRoomWorkloads, timeline
-│       ├── dashboard-store.ts     # Zustand: фильтры + выбранный преподаватель/аудитория
-│       └── api-hooks.ts           # TanStack Query хуки для эндпоинтов
-├── .env                           # DATABASE_URL=...
-├── package.json
+│       ├── db.ts                    # PrismaClient (+ опциональное логирование запросов)
+│       ├── analytics.ts             # все расчёты аналитики (raw SQL GROUP BY)
+│       ├── timing.ts                # пошаговое логирование времени
+│       ├── dashboard-store.ts       # Zustand: фильтры + выбранный преподаватель/аудитория
+│       └── api-hooks.ts             # TanStack Query хуки (типизированные)
+├── .env                             # DATABASE_URL=...
+├── db_schema.md                     # экспорт структуры БД (генерируется)
 └── README.md
 ```
 
@@ -295,30 +343,39 @@ bun run scripts/recompute-simultaneous.ts
 
 ## API дашборда
 
-Все эндпоинты находятся под `/api/analytics/*` и принимают query-параметры:
+Базовые query-параметры (принимают все эндпоинты аналитики):
 
 | Параметр | Тип | Описание |
 |----------|-----|----------|
-| `from` | ISO-дата | Начало периода (по `startDateTime`) |
-| `to` | ISO-дата | Конец периода (по `startDateTime`) |
-| `kindCode` | `0|1|2|all` | Тип занятия (0=индив., 1=регулярные, 2=сессия) |
-| `includeCanceled` | `true|false` | Включать ли отменённые (по умолчанию `false`) |
+| `dateRangeIds` | `1,3` | Периоды из `DateRange` (мультивыбор; пусто = все) |
+| `lessonFormIds` | `1,4` | Формы занятий (мультивыбор; пусто = все) |
+| `kindCode` | `0\|1\|2\|3\|all` | Тип занятия |
+| `includeCanceled` | `true\|false` | Включать ли отменённые (по умолчанию `false`) |
 
 ### Эндпоинты
 
 | Метод | Путь | Описание |
 |-------|------|---------|
-| GET | `/api/analytics/overview` | KPI, by-kind, weekly timeline, топ-5 преподавателей/аудиторий, опции фильтров |
-| GET | `/api/analytics/teachers?sort=&top=` | Рейтинг преподавателей (`sort`: `effectiveHours` \| `scheduledHours` \| `eventsCount` \| `simultaneousGroups` \| `simultaneousEvents` \| `name`) |
-| GET | `/api/analytics/rooms?sort=&top=` | Рейтинг аудиторий (`sort`: `hours` \| `events` \| `uniqueLectures` \| `conflicts` \| `name`) |
-| GET | `/api/analytics/timeline?granularity=` | Бакеты по неделям/дням, by-day-of-week, by-hour, heatmap 7×24 (`granularity`: `day` \| `week`) |
-| GET | `/api/analytics/teacher/[id]` | Полная детализация преподавателя: KPI, графики, топ-10 дисциплин, одновременные группы, последние 100 занятий |
-| GET | `/api/analytics/room/[id]` | Полная детализация аудитории: KPI, конфликты, графики, топ-10 дисциплин и преподавателей, последние 100 лекций |
+| GET | `/api/analytics/kpi` | KPI-итоги выборки |
+| GET | `/api/analytics/by-kind` | События по типам занятий |
+| GET | `/api/analytics/by-lesson-form` | События по формам занятий |
+| GET | `/api/analytics/by-month-by-kind` | События по месяцам × типам |
+| GET | `/api/analytics/timeline?granularity=week\|day` | Динамика по неделям/дням |
+| GET | `/api/analytics/heatmap` | Тепловая карта 7×24 (день недели × час) |
+| GET | `/api/analytics/top-teachers?limit=` | Топ преподавателей по эффективной нагрузке |
+| GET | `/api/analytics/top-rooms?limit=` | Топ аудиторий по загрузке |
+| GET | `/api/analytics/teachers?sort=&search=&page=&pageSize=` | Список преподавателей (`sort`: `effectiveHours` \| `scheduledHours` \| `eventsCount` \| `simultaneousGroups` \| `simultaneousEvents` \| `name`; + `topLevelUnitId=`) |
+| GET | `/api/analytics/rooms?sort=&search=&page=&pageSize=` | Список аудиторий (`sort`: `hours` \| `events` \| `uniqueLectures` \| `conflicts` \| `name`; + `addressIds=`) |
+| GET | `/api/analytics/teacher/[id]` | Детали преподавателя: KPI, должности, графики, последние занятия |
+| GET | `/api/analytics/room/[id]` | Детали аудитории: KPI, конфликты, графики, лекции |
+| GET | `/api/analytics/meta` | Периоды, типы, формы занятий (опции фильтров) |
+| GET | `/api/analytics/addresses` | Справочник адресов с числом аудиторий |
+| GET | `/api/analytics/top-level-units` | Подразделения 1-го уровня с числом преподавателей |
 
 Пример:
 
 ```bash
-curl "http://localhost:3000/api/analytics/teachers?includeCanceled=false&sort=effectiveHours&top=10"
+curl "http://localhost:3000/api/analytics/teachers?includeCanceled=false&topLevelUnitId=1&sort=effectiveHours&page=1&pageSize=20"
 ```
 
 ---
@@ -342,19 +399,9 @@ curl "http://localhost:3000/api/analytics/teachers?includeCanceled=false&sort=ef
 **последовательные** занятия (back-to-back), а **не одновременные**. Они не
 объединяются в одну группу и не считаются конфликтом бронирования аудитории.
 
-Реализация:
-- В sweep-line для одновременных групп: событие B добавляется в текущую цепочку
-  только если `B.start < chainMaxEnd` (строгое неравенство). Условие
-  `B.start === chainMaxEnd` начинает новую цепочку.
-- В детекции конфликтов аудиторий: цикл прерывается, когда
-  `B.start >= A.end` — то есть `B.start === A.end` (касание границ) тоже
-  прерывает цикл и не добавляет конфликт.
-
 Цепочка всё же может объединять back-to-back события, если они оба
-пересекаются с каким-то третьим событием. Например, A: 18:40–19:00,
-B: 19:00–20:30 и C: 18:40–19:10 — A и B касаются границами, но C пересекается
-с обоими, поэтому все три входят в одну цепочку. Это корректно: преподаватель
-не может одновременно вести A, B и C.
+пересекаются с каким-то третьим событием: преподаватель не может вести A, B и C
+одновременно, поэтому все три попадают в одну цепочку.
 
 ### Дедупликация аудиторий (lectureHash)
 
@@ -362,14 +409,21 @@ B: 19:00–20:30 и C: 18:40–19:10 — A и B касаются граница�
 ведёт (соавторов), и для каждой группы студентов. Хэш `lectureHash` строится из
 `subject + start + end + sorted(locations) + sorted(educators)` (без групп),
 поэтому все строки одной физической лекции сливаются в **один уникальный слот**
-для подсчёта загрузки аудитории.
+для подсчёта загрузки аудитории — совместное ведение и потоки не создают
+ложных конфликтов.
 
 ### Конфликты аудиторий
 
-Перекрытия во времени между **разными** `lectureHash` в одной аудитории. Например,
-преподаватель ведёт два разных предмета в одной аудитории в одно время — это
-конфликт, а не одновременная лекция. Back-to-back лекции (одна заканчивается
-в 14:00, следующая начинается в 14:00) **не считаются конфликтом**.
+Перекрытия во времени между **разными** `lectureHash` в одной аудитории.
+Back-to-back лекции (одна заканчивается в 14:00, следующая начинается в 14:00)
+**не считаются конфликтом**.
+
+### Производительность
+
+Тяжёлые расчёты выполняются как raw-SQL агрегации (`GROUP BY` + `MIN/MAX`)
+вместо загрузки всех событий в JS: на 400k+ событий это даёт 3–10×
+ускорение. См. также `connection_limit=1` и `PRAGMA cache_size`
+в `src/lib/db.ts`.
 
 ---
 
@@ -378,65 +432,47 @@ B: 19:00–20:30 и C: 18:40–19:10 — A и B касаются граница�
 | Симптом | Решение |
 |---------|---------|
 | `Cannot find module '@prisma/client'` | `bun run db:generate` |
-| `Unknown field 'lectureHash'` после изменения схемы | перезапустить dev-сервер: `kill <pid>; bun run dev` |
-| Ошибка `We found changes that cannot be executed` при `db:push` | `bun run db:push --force-reset` (с потерей данных) |
+| `Unknown field …` после изменения схемы | перезапустить dev-сервер |
+| Ошибка `We found changes that cannot be executed` при `db:push` | `bun run db:push --accept-data-loss` (проверьте, что теряете только лишнее) |
 | Импорт пишет `0 events so far` | проверьте, что папка содержит `.json`-файлы нужного формата (`EducatorMasterId`, `EducatorEventsDays`) |
-| Дашборд показывает `Нет данных` | запустите импорт заново и убедитесь, что `db/custom.db` создан |
-| Сервер не стартует на порту 3000 | проверьте, что порт свободен: `lsof -i :3000` |
-| Prisma-логи засоряют консоль | проверьте `src/lib/db.ts` — `log` должен быть `['error', 'warn']` |
+| Дашборд показывает `Нет данных` | запустите импорт и убедитесь, что `db/custom.db` создан |
+| Сервер не стартует: `Unable to acquire lock at .next/dev/lock` | остановите другой экземпляр `next dev` |
+| Диагностика медленных запросов | `DB_LOG_SLOW_MS=0 ANALYTICS_LOG_SLOW_MS=0 bun run dev` |
 
 ---
 
 ## Развёртывание на сервере (production)
 
-Эта инструкция предполагает, что на сервере уже установлен **Bun 1.3+**
-и **git**. Bun — это пакетный менеджер, runtime и bundler в одном флаконе,
-поэтому отдельная установка Node.js или npm не требуется (Bun умеет
-запускать `.js`/`.ts`-файлы и `package.json`-скрипты напрямую).
+Инструкция предполагает, что на сервере уже установлен **Bun 1.3+** и **git**.
 
 ### 0. Проверка окружения
 
 ```bash
 bun --version    # должно быть 1.3.x или выше
-git --version    # для клонирования репозитория
+git --version
 ```
 
-Если Bun не установлен или версия ниже 1.3:
+Если Bun не установлен:
 
 ```bash
-# Установка/обновление Bun (официальный способ):
 curl -fsSL https://bun.sh/install | bash
-
-# После установки перезагрузите shell или:
 source ~/.bashrc
 ```
 
-### 1. Клонирование и установка зависимостей
+### 1. Клонирование и установка
 
 ```bash
 git clone <repo-url> schedule-analytics
 cd schedule-analytics
-
-# Bun-эквивалент `npm install` — намного быстрее (10–100×)
 bun install
 ```
 
-> ℹ️ Bun устанавливает все зависимости (включая devDependencies) по умолчанию.
-> Для production-окружения это нормально — Prisma требует devDependencies
-> для генерации клиента (`prisma generate`).
-
-### 2. Настройка переменных окружения
-
-Создайте файл `.env` в корне проекта:
+### 2. Переменные окружения
 
 ```bash
-# Абсолютный путь к SQLite-файлу (рекомендуется абсолютный путь,
-# чтобы он не зависел от текущей директории запуска).
-# Директория должна существовать и быть доступной для записи.
+# Абсолютный путь к SQLite-файлу (рекомендуется)
 DATABASE_URL=file:/var/lib/schedule-analytics/custom.db
 ```
-
-Создайте директорию под базу данных:
 
 ```bash
 sudo mkdir -p /var/lib/schedule-analytics
@@ -446,69 +482,36 @@ sudo chown -R $USER:$USER /var/lib/schedule-analytics
 ### 3. Инициализация базы данных
 
 ```bash
-# Сгенерировать Prisma-клиент (создаёт ./node_modules/@prisma/client)
 bun run db:generate
-
-# Применить схему к SQLite (создаст файл из DATABASE_URL)
 bun run db:push
 ```
 
-После этого в `/var/lib/schedule-analytics/` появится пустой файл `custom.db`.
-
-### 4. Импорт расписания
+### 4. Импорт данных
 
 ```bash
-# Положить JSON-файлы в любую директорию (можно с подпапками)
-mkdir -p /var/lib/schedule-analytics/schedules
-# scp или rsync ваших JSON-файлов в эту директорию
-
-# Bun умеет запускать TypeScript-файлы напрямую — tsx/npx не нужен
-bun run scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
+bun run scripts/import-schedules.ts /var/lib/schedule-analytics/timetable
+bun run scripts/import-staff.ts /var/lib/schedule-analytics/staff
+bun run scripts/import-employees.ts /var/lib/schedule-analytics/employees.json
 ```
 
-> ⚠️ Импорт НЕ очищает базу данных. Повторный запуск того же файла
-> пропустит все события как дубликаты. Для обновления изменённых
-> данных используйте `bun run db:push --force-reset` (полная очистка).
+> ⚠️ Импорты **не очищают базу**: повторный запуск пропускает дубликаты
+> и дозаполняет новые поля. Для полной очистки — `db:push --force-reset`.
 
 ### 5. Сборка production-бандла
 
 ```bash
-# Собрать standalone-бандл в .next/standalone/
-bun run build
+bun run build   # → .next/standalone/ (+ static и public)
 ```
-
-Эта команда:
-- собирает Next.js в `.next/standalone/` (включает `server.js` и
-  минимальные `node_modules`);
-- копирует `.next/static/` и `public/` в `standalone/`.
 
 ### 6. Запуск production-сервера
 
-Создайте файл `start.sh` в корне проекта для запуска под Bun:
-
 ```bash
-cat > start.sh << 'EOF'
-#!/usr/bin/env bash
-set -e
-cd "$(dirname "$0")"
 export NODE_ENV=production
 export DATABASE_URL=file:/var/lib/schedule-analytics/custom.db
-exec bun .next/standalone/server.js
-EOF
-chmod +x start.sh
-
-# Проверка запуска вручную:
-./start.sh
-# Откройте http://<server-ip>:3000 — дашборд должен загрузиться
+bun .next/standalone/server.js   # порт 3000
 ```
 
-> ⚠️ Production-сервер слушает порт 3000 по умолчанию. Чтобы изменить,
-> отредактируйте `next.config.ts` (добавьте `server: { port: <port> }`) и
-> пересоберите.
-
 ### 7. Запуск как сервис (systemd)
-
-Создайте unit-файл:
 
 ```bash
 sudo tee /etc/systemd/system/schedule-analytics.service << 'EOF'
@@ -534,43 +537,14 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable schedule-analytics
-sudo systemctl start schedule-analytics
-sudo systemctl status schedule-analytics
+sudo systemctl enable --now schedule-analytics
 ```
 
-> ℹ️ Путь к `bun` зависит от способа установки. Проверьте через `which bun`
-> и обновите `ExecStart` соответственно. Для системной установки это
-> обычно `/usr/local/bin/bun`, для пользовательской —
-> `/home/<username>/.bun/bin/bun`.
-
-Просмотр логов:
-
-```bash
-sudo journalctl -u schedule-analytics -f
-```
-
-Перезапуск:
-
-```bash
-sudo systemctl restart schedule-analytics
-```
+Логи: `sudo journalctl -u schedule-analytics -f`.
 
 ### 8. Reverse proxy (Nginx)
 
-Production обычно запускается за Nginx, чтобы терминировать TLS и
-пробрасывать трафик на Bun-сервер:
-
-```bash
-sudo tee /etc/nginx/sites-available/schedule-analytics << 'EOF'
-server {
-    listen 80;
-    server_name analytics.example.com;
-
-    # Редирект на HTTPS
-    return 301 https://$host$request_uri;
-}
-
+```nginx
 server {
     listen 443 ssl http2;
     server_name analytics.example.com;
@@ -585,83 +559,49 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
     }
 }
-EOF
-
-sudo ln -s /etc/nginx/sites-available/schedule-analytics /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-
-# Получить TLS-сертификат через Let's Encrypt:
-sudo certbot --nginx -d analytics.example.com
 ```
+
+TLS-сертификат: `sudo certbot --nginx -d analytics.example.com`.
 
 ### 9. Обновление приложения
 
 ```bash
 cd /opt/schedule-analytics
-
-# 1. Получить новые изменения
 git pull origin main
-
-# 2. Установить новые зависимости (если package.json изменился)
 bun install
-
-# 3. Перегенерировать Prisma-клиент (если schema.prisma изменилась)
 bun run db:generate
-bun run db:push   # безопасно — не дропает данные, только добавляет новые поля/таблицы
-
-# 4. Пересобрать
+bun run db:push   # безопасно — только добавляет таблицы/поля
 bun run build
-
-# 5. Перезапустить сервис
 sudo systemctl restart schedule-analytics
 ```
 
-### 10. Обновление данных расписания
+### 10. Обновление данных
 
-Дашборд читает БД в реальном времени — **сервер перезапускать не нужно**
-(но нужно остановить его на время импорта, см. ниже):
+Дашборд читает БД в реальном времени — перезапускать сервер не обязательно.
+Импорты идемпотентны (дубликаты пропускаются, новые поля дозаполняются):
 
 ```bash
-# 1. Положить новые JSON-файлы в папку расписаний
-# 2. Остановить web-сервер (важно — иначе SQLite будет блокировать запись)
-sudo systemctl stop schedule-analytics
-
-# 3. Импортировать новые данные (добавятся к существующим)
-bun run scripts/import-schedules.ts /var/lib/schedule-analytics/schedules
-
-# 4. Запустить web-сервер обратно
-sudo systemctl start schedule-analytics
+bun run scripts/import-schedules.ts /var/lib/schedule-analytics/timetable
+bun run scripts/import-staff.ts /var/lib/schedule-analytics/staff
+bun run scripts/import-employees.ts /var/lib/schedule-analytics/employees.json
 ```
 
-> ⚠️ Web-сервер и импорт-скрипт не должны работать одновременно —
-> SQLite поддерживает одного writer-а, а импорт использует
-> `PRAGMA locking_mode` для скорости. Перед импортом остановите
-> `schedule-analytics` сервис.
+Рекомендуется выполнять импорты при низкой нагрузке: они работают в одной
+транзакции и конкурируют с веб-сервером за запись в SQLite.
 
 ### 11. Резервное копирование
 
 ```bash
-# SQLite — это один файл, можно просто копировать
-sudo cp /var/lib/schedule-analytics/custom.db /backup/custom-$(date +%Y%m%d).db
-
-# Лучше использовать .backup (создаёт согласованную копию):
+# Согласованная копия через .backup:
 sqlite3 /var/lib/schedule-analytics/custom.db ".backup /backup/custom-$(date +%Y%m%d).db"
 
-# Cron для ежедневного бэкапа (в 3:00 ночи):
-crontab -e
-# Добавьте строку:
+# Cron на ежедневный бэкап (3:00 ночи):
 0 3 * * * sqlite3 /var/lib/schedule-analytics/custom.db ".backup /backup/custom-$(date +\%Y\%m\%d).db" && find /backup -name "custom-*.db" -mtime +30 -delete
 ```
 
 ### Docker (альтернатива)
-
-Если предпочитаете Docker — минимальный `Dockerfile` на базе официального
-Bun-образа:
 
 ```dockerfile
 FROM oven/bun:1.3
@@ -678,11 +618,9 @@ CMD ["bun", ".next/standalone/server.js"]
 
 ```bash
 docker build -t schedule-analytics .
-docker run -d \
-  --name schedule-analytics \
-  -p 3000:3000 \
+docker run -d --name schedule-analytics -p 3000:3000 \
   -v /var/lib/schedule-analytics:/data \
-  -v /var/lib/schedule-analytics/schedules:/app/upload \
+  -v /var/lib/schedule-analytics/timetable:/app/upload/timetable \
   schedule-analytics
 ```
 

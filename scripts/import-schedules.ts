@@ -55,14 +55,17 @@
  *      --force-reset` to clear the DB first, then re-run the importer.
  *
  * Usage:  bun run scripts/import-schedules.ts [directory]
- *   default directory = ./upload
+ *   default directory = ./upload/timetable
  */
 
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import { db } from '../src/lib/db';
+import { isSqlite } from '../src/lib/sql-dialect';
 import type { Prisma } from '@prisma/client';
+import { extractLessonForm } from './lesson-forms';
+import { parseLocationAddress } from './address-parse';
 
 // ---------- Types ----------
 
@@ -122,6 +125,7 @@ const KIND_LABELS: Record<number, string> = {
   0: 'Индивидуальные мероприятия',
   1: 'Регулярные занятия',
   2: 'Сессия / консультации',
+  3: 'ГИА',
 };
 
 // ---------- Entity caches ----------
@@ -131,6 +135,9 @@ interface EntityCaches {
   location: Map<string, { id: number; latitude: number | null; longitude: number | null }>;
   group: Map<string, number>;
   educator: Set<number>;
+  dateRange: Map<string, number>;
+  lessonForm: Map<string, number>;
+  address: Map<string, number>;
 }
 
 function newCaches(): EntityCaches {
@@ -139,6 +146,9 @@ function newCaches(): EntityCaches {
     location: new Map(),
     group: new Map(),
     educator: new Set(),
+    dateRange: new Map(),
+    lessonForm: new Map(),
+    address: new Map(),
   };
 }
 
@@ -158,11 +168,14 @@ async function preloadCaches(caches: EntityCaches): Promise<void> {
   const t0 = Date.now();
   console.log('Pre-populating entity caches from existing DB…');
 
-  const [subjects, locations, groups, educators] = await Promise.all([
+  const [subjects, locations, groups, educators, dateRanges, lessonForms, addresses] = await Promise.all([
     db.subject.findMany({ select: { id: true, name: true } }),
     db.location.findMany({ select: { id: true, displayName: true, latitude: true, longitude: true } }),
     db.group.findMany({ select: { id: true, name: true } }),
     db.educator.findMany({ select: { id: true } }),
+    db.dateRange.findMany({ select: { id: true, displayText: true } }),
+    db.lessonForm.findMany({ select: { id: true, name: true } }),
+    db.address.findMany({ select: { id: true, displayName: true } }),
   ]);
 
   for (const s of subjects) caches.subject.set(s.name, s.id);
@@ -171,9 +184,12 @@ async function preloadCaches(caches: EntityCaches): Promise<void> {
   }
   for (const g of groups) caches.group.set(g.name, g.id);
   for (const e of educators) caches.educator.add(e.id);
+  for (const dr of dateRanges) caches.dateRange.set(dr.displayText, dr.id);
+  for (const lf of lessonForms) caches.lessonForm.set(lf.name, lf.id);
+  for (const a of addresses) caches.address.set(a.displayName, a.id);
 
   console.log(
-    `  Loaded ${subjects.length} subjects, ${locations.length} locations, ${groups.length} groups, ${educators.length} educators in ${((Date.now() - t0) / 1000).toFixed(2)}s.`,
+    `  Loaded ${subjects.length} subjects, ${locations.length} locations, ${groups.length} groups, ${educators.length} educators, ${dateRanges.length} date ranges, ${lessonForms.length} lesson forms, ${addresses.length} addresses in ${((Date.now() - t0) / 1000).toFixed(2)}s.`,
   );
 }
 
@@ -309,6 +325,7 @@ async function walkDir(dir: string, out: string[]): Promise<void> {
 // ---------- SQLite PRAGMA setup ----------
 
 async function setupPragmas(): Promise<void> {
+  if (!isSqlite) return; // PostgreSQL needs no client-side tuning
   // These PRAGMAs dramatically reduce fsync overhead for large bulk imports.
   // `journal_mode = WAL` is persistent (survives script exit); the rest are
   // per-connection but take effect for this script's transaction.
@@ -348,18 +365,41 @@ async function getOrCreateSubject(
   return subject.id;
 }
 
+async function getOrCreateAddress(
+  tx: Prisma.TransactionClient,
+  cache: Map<string, number>,
+  displayName: string,
+): Promise<number> {
+  const cached = cache.get(displayName);
+  if (cached !== undefined) return cached;
+  const row = await tx.address.upsert({
+    where: { displayName },
+    create: { displayName },
+    update: {},
+    select: { id: true },
+  });
+  cache.set(displayName, row.id);
+  return row.id;
+}
+
 async function getOrCreateLocation(
   tx: Prisma.TransactionClient,
   cache: Map<string, { id: number; latitude: number | null; longitude: number | null }>,
+  addressCache: Map<string, number>,
   displayName: string,
   latitude: number | null,
   longitude: number | null,
 ): Promise<number> {
   const cached = cache.get(displayName);
   if (cached) return cached.id;
+  // The address part ("<Улица>, д. <дом>") is parsed out of the display name
+  // and linked for the address filter on the rooms tab. Virtual places
+  // without a "д. N" segment get no address (addressId = null).
+  const parsed = parseLocationAddress(displayName);
+  const addressId = parsed ? await getOrCreateAddress(tx, addressCache, parsed.address) : null;
   const location = await tx.location.upsert({
     where: { displayName },
-    create: { displayName, latitude, longitude },
+    create: { displayName, latitude, longitude, addressId },
     update: {},
     select: { id: true },
   });
@@ -384,11 +424,47 @@ async function getOrCreateGroup(
   return group.id;
 }
 
+async function getOrCreateDateRange(
+  tx: Prisma.TransactionClient,
+  cache: Map<string, number>,
+  displayText: string,
+  dateFrom: Date,
+  dateTo: Date,
+): Promise<number> {
+  const cached = cache.get(displayText);
+  if (cached !== undefined) return cached;
+  const row = await tx.dateRange.upsert({
+    where: { displayText },
+    create: { displayText, dateFrom, dateTo },
+    update: { dateFrom, dateTo },
+    select: { id: true },
+  });
+  cache.set(displayText, row.id);
+  return row.id;
+}
+
+async function getOrCreateLessonForm(
+  tx: Prisma.TransactionClient,
+  cache: Map<string, number>,
+  name: string,
+): Promise<number> {
+  const cached = cache.get(name);
+  if (cached !== undefined) return cached;
+  const row = await tx.lessonForm.upsert({
+    where: { name },
+    create: { name },
+    update: {},
+    select: { id: true },
+  });
+  cache.set(name, row.id);
+  return row.id;
+}
+
 async function ensureEducator(
   tx: Prisma.TransactionClient,
   cache: Set<number>,
   id: number,
-  data: { displayName: string; longName: string; scheduleFrom: Date; scheduleTo: Date; isSpringTerm: boolean },
+  data: { displayName: string; longName: string },
 ): Promise<void> {
   if (cache.has(id)) return;
   await tx.educator.upsert({
@@ -405,39 +481,43 @@ async function importFile(
   filePath: string,
   tx: Prisma.TransactionClient,
   caches: EntityCaches,
-): Promise<{ events: number; skipped: number }> {
+): Promise<{ events: number; skipped: number; enriched: number }> {
   const content = await fs.readFile(filePath, 'utf-8');
   let data: ScheduleFile;
   try {
     data = JSON.parse(content) as ScheduleFile;
   } catch (e) {
     console.error(`Skipping (bad JSON): ${filePath} — ${(e as Error).message}`);
-    return { events: 0, skipped: 0 };
+    return { events: 0, skipped: 0, enriched: 0 };
   }
   if (!data || typeof data.EducatorMasterId !== 'number') {
     console.error(`Skipping (no EducatorMasterId): ${filePath}`);
-    return { events: 0, skipped: 0 };
+    return { events: 0, skipped: 0, enriched: 0 };
   }
 
   const from = new Date(data.From);
   const to = new Date(data.To);
   if (isNaN(from.getTime()) || isNaN(to.getTime())) {
     console.error(`Skipping (bad term range): ${filePath}`);
-    return { events: 0, skipped: 0 };
+    return { events: 0, skipped: 0, enriched: 0 };
   }
   const range = { from, to };
+
+  // Ensure the schedule term period exists (DateRangeDisplayText + From/To).
+  const dateRangeId =
+    data.DateRangeDisplayText && data.DateRangeDisplayText.trim() !== ''
+      ? await getOrCreateDateRange(tx, caches.dateRange, data.DateRangeDisplayText, from, to)
+      : null;
 
   // Ensure the primary educator exists (cached — only first file per ID).
   await ensureEducator(tx, caches.educator, data.EducatorMasterId, {
     displayName: data.EducatorDisplayText,
     longName: data.EducatorLongDisplayText,
-    scheduleFrom: from,
-    scheduleTo: to,
-    isSpringTerm: !!data.IsSpringTerm,
   });
 
   let eventsInserted = 0;
   let eventsSkippedDuplicate = 0;
+  let eventsEnriched = 0;
 
   for (const day of data.EducatorEventsDays || []) {
     for (const ev of day.DayStudyEvents || []) {
@@ -454,8 +534,16 @@ async function importFile(
         }
       }
 
-      // Get or create subject (cached).
+      // Get or create subject (cached). Subject.name keeps the full text
+      // including the lesson form tail.
       const subjectId = await getOrCreateSubject(tx, caches.subject, ev.Subject);
+
+      // Lesson form parsed from the Subject tail ("…, лекция") — the same
+      // for every date of this event.
+      const lessonFormName = extractLessonForm(ev.Subject);
+      const lessonFormId = lessonFormName
+        ? await getOrCreateLessonForm(tx, caches.lessonForm, lessonFormName)
+        : null;
 
       for (const d of dates) {
         const startDateTime = timeToDate(d, ev.Start);
@@ -473,10 +561,18 @@ async function importFile(
             subjectId,
             globalEventHash,
           },
-          select: { id: true },
+          select: { id: true, dateRangeId: true, lessonFormId: true },
         });
         if (existing) {
           eventsSkippedDuplicate++;
+          // Backfill the new period/lesson-form references on legacy rows.
+          const patch: Prisma.ScheduleEventUncheckedUpdateInput = {};
+          if (existing.dateRangeId !== dateRangeId) patch.dateRangeId = dateRangeId;
+          if ((existing.lessonFormId ?? null) !== (lessonFormId ?? null)) patch.lessonFormId = lessonFormId;
+          if (Object.keys(patch).length > 0) {
+            eventsEnriched++;
+            await tx.scheduleEvent.update({ where: { id: existing.id }, data: patch });
+          }
           continue;
         }
 
@@ -490,6 +586,7 @@ async function importFile(
           const id = await getOrCreateLocation(
             tx,
             caches.location,
+            caches.address,
             loc.DisplayName,
             loc.HasGeographicCoordinates ? loc.Latitude ?? null : null,
             loc.HasGeographicCoordinates ? loc.Longitude ?? null : null,
@@ -509,7 +606,9 @@ async function importFile(
         }
 
         // Insert the event (no co-educators — derived at query time via
-        // lectureHash JOIN).
+        // lectureHash JOIN). The FIRST location is denormalized onto the
+        // event (fast path for room analytics); only additional locations
+        // go into the links table.
         await tx.scheduleEvent.create({
           data: {
             educatorId: data.EducatorMasterId,
@@ -531,8 +630,11 @@ async function importFile(
             educatorsDisplayText: ev.EducatorsDisplayText || '',
             globalEventHash,
             lectureHash,
-            locations: { create: locationIds.map((id) => ({ locationId: id })) },
+            locationId: locationIds[0] ?? null,
+            locations: { create: locationIds.slice(1).map((id) => ({ locationId: id })) },
             groups: { create: groupIds.map((id) => ({ groupId: id })) },
+            dateRangeId,
+            lessonFormId,
           },
         });
         eventsInserted++;
@@ -542,7 +644,7 @@ async function importFile(
   if (eventsSkippedDuplicate > 0) {
     console.log(`  (${eventsSkippedDuplicate} duplicate date(s) skipped in ${filePath})`);
   }
-  return { events: eventsInserted, skipped: eventsSkippedDuplicate };
+  return { events: eventsInserted, skipped: eventsSkippedDuplicate, enriched: eventsEnriched };
 }
 
 // ---------- Simultaneous-group computation ----------
@@ -604,7 +706,7 @@ async function computeSimultaneousGroups(
 // ---------- Main ----------
 
 async function main() {
-  const dir = process.argv[2] || './upload';
+  const dir = process.argv[2] || './upload/timetable';
   console.log(`Importing schedules from: ${dir}`);
 
   const t0 = Date.now();
@@ -638,6 +740,7 @@ async function main() {
   const tImportStart = Date.now();
   let totalEvents = 0;
   let totalSkipped = 0;
+  let totalEnriched = 0;
   let ok = 0;
   let failed = 0;
 
@@ -646,9 +749,10 @@ async function main() {
       async (tx) => {
         for (let i = 0; i < files.length; i++) {
           try {
-            const { events, skipped } = await importFile(files[i], tx, caches);
+            const { events, skipped, enriched } = await importFile(files[i], tx, caches);
             totalEvents += events;
             totalSkipped += skipped;
+            totalEnriched += enriched;
             ok++;
             if ((i + 1) % 25 === 0 || i === files.length - 1) {
               console.log(`  Processed ${i + 1}/${files.length} files, ${totalEvents} events so far.`);
@@ -667,7 +771,9 @@ async function main() {
   }
 
   const tImportEnd = Date.now();
-  console.log(`Imported ${totalEvents} events from ${ok} file(s) (${failed} failed, ${totalSkipped} duplicates skipped).`);
+  console.log(
+    `Imported ${totalEvents} events from ${ok} file(s) (${failed} failed, ${totalSkipped} duplicates skipped, ${totalEnriched} legacy rows enriched).`,
+  );
 
   // Step 5: Compute simultaneous groups in a separate transaction
   console.log('Computing simultaneous groups…');
@@ -696,6 +802,8 @@ async function main() {
   const locations = await db.location.count();
   const subjects = await db.subject.count();
   const groupsCount = await db.group.count();
+  const dateRangesCount = await db.dateRange.count();
+  const lessonFormsCount = await db.lessonForm.count();
   const kindCodes = await db.scheduleEvent.groupBy({
     by: ['kindCode'],
     _count: { _all: true },
@@ -706,6 +814,8 @@ async function main() {
   console.log(`Locations: ${locations}`);
   console.log(`Subjects: ${subjects}`);
   console.log(`Groups: ${groupsCount}`);
+  console.log(`Date ranges: ${dateRangesCount}`);
+  console.log(`Lesson forms: ${lessonFormsCount}`);
   for (const k of kindCodes) {
     console.log(`  Kind ${k.kindCode} (${KIND_LABELS[k.kindCode] ?? '?'}): ${k._count._all}`);
   }

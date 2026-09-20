@@ -1,11 +1,27 @@
 import { db } from '@/lib/db'
+import { withTiming } from '@/lib/timing'
+import {
+  adaptPlaceholders,
+  boolFalse,
+  dayBucketExpr,
+  epochMillis,
+  hourExpr,
+  isoWeekBucketExpr,
+  likeEscapeClause,
+  monthExpr,
+} from '@/lib/sql-dialect'
 import type { Prisma } from '@prisma/client'
+
+/** Dialect-aware raw query: converts `?` placeholders for PostgreSQL. */
+const rawQuery = (sql: string, ...params: (string | number)[]) =>
+  db.$queryRawUnsafe(adaptPlaceholders(sql), ...params)
 
 // Maps kindCode to a human-readable Russian label.
 export const KIND_LABELS: Record<number, string> = {
   0: 'Индивидуальные мероприятия',
   1: 'Регулярные занятия',
   2: 'Сессия / консультации',
+  3: 'ГИА',
 }
 
 export interface DateRange {
@@ -14,19 +30,48 @@ export interface DateRange {
 }
 
 export interface CommonFilters {
-  from?: string | null
-  to?: string | null
+  /** Comma-separated DateRange ids (e.g. "1,3"). Empty/absent = all periods. */
+  dateRangeIds?: string | null
+  /** Comma-separated LessonForm ids (e.g. "1,4"). Empty/absent = all forms. */
+  lessonFormIds?: string | null
   kindCode?: string | null
   includeCanceled?: string | null
+}
+
+/** Parse the common dashboard filters from a request URL's query string. */
+export function parseCommonFilters(url: URL): CommonFilters {
+  return {
+    dateRangeIds: url.searchParams.get('dateRangeIds'),
+    lessonFormIds: url.searchParams.get('lessonFormIds'),
+    kindCode: url.searchParams.get('kindCode'),
+    includeCanceled: url.searchParams.get('includeCanceled') ?? 'false',
+  }
+}
+
+/** Parse a comma-separated id list into positive integers. */
+export function parseIdList(s: string | null | undefined): number[] {
+  if (!s) return []
+  return s
+    .split(',')
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0)
+}
+
+/** Convert minutes to hours rounded to 1 decimal — API response formatting. */
+export function roundHours(minutes: number): number {
+  return Math.round((minutes / 60) * 10) / 10
 }
 
 /** Build a Prisma where-clause fragment for ScheduleEvent based on common filters. */
 export function buildEventWhere(filters: CommonFilters): Prisma.ScheduleEventWhereInput {
   const where: Prisma.ScheduleEventWhereInput = {}
-  if (filters.from || filters.to) {
-    where.startDateTime = {}
-    if (filters.from) where.startDateTime.gte = new Date(filters.from)
-    if (filters.to) where.startDateTime.lte = new Date(filters.to)
+  const dateRangeIds = parseIdList(filters.dateRangeIds)
+  if (dateRangeIds.length > 0) {
+    where.dateRangeId = { in: dateRangeIds }
+  }
+  const lessonFormIds = parseIdList(filters.lessonFormIds)
+  if (lessonFormIds.length > 0) {
+    where.lessonFormId = { in: lessonFormIds }
   }
   if (filters.kindCode && filters.kindCode !== 'all') {
     const n = Number(filters.kindCode)
@@ -36,6 +81,77 @@ export function buildEventWhere(filters: CommonFilters): Prisma.ScheduleEventWhe
     where.isCanceled = false
   }
   return where
+}
+
+// =====================================================
+// Raw-SQL helpers
+//
+// The heavy dashboard computations below are implemented as single
+// aggregation queries (GROUP BY) instead of loading every matching event
+// into JS: with 400k+ events the Prisma row materialization alone costs
+// tens of seconds, while SQLite answers the aggregates in one pass.
+//
+// All time arithmetic relies on `startDateTime`/`endDateTime` being stored
+// as a Unix epoch in MILLISECONDS (Prisma/SQLite DateTime mapping).
+// =====================================================
+
+interface SqlWhere {
+  conditions: string[]
+  params: (string | number)[]
+}
+
+/**
+ * Translate common filters into raw SQL conditions on ScheduleEvent.
+ * Mirrors `buildEventWhere` semantics exactly. `alias` qualifies the column
+ * names when the event table is joined under an alias.
+ */
+function sqlEventWhere(where: Prisma.ScheduleEventWhereInput, alias?: string): SqlWhere {
+  // Quoted identifiers work on both SQLite and PostgreSQL; quoting is
+  // required on PG, where unquoted names fold to lowercase.
+  const col = (name: string) => (alias ? `${alias}."${name}"` : `"${name}"`)
+  const conditions: string[] = []
+  const params: (string | number)[] = []
+  const dateRangeFilter = where.dateRangeId as { in?: number[] } | undefined
+  if (
+    dateRangeFilter &&
+    typeof dateRangeFilter === 'object' &&
+    Array.isArray(dateRangeFilter.in) &&
+    dateRangeFilter.in.length > 0
+  ) {
+    conditions.push(`${col('dateRangeId')} IN (${dateRangeFilter.in.map(() => '?').join(',')})`)
+    params.push(...dateRangeFilter.in)
+  }
+  const lessonFormFilter = where.lessonFormId as { in?: number[] } | undefined
+  if (
+    lessonFormFilter &&
+    typeof lessonFormFilter === 'object' &&
+    Array.isArray(lessonFormFilter.in) &&
+    lessonFormFilter.in.length > 0
+  ) {
+    conditions.push(`${col('lessonFormId')} IN (${lessonFormFilter.in.map(() => '?').join(',')})`)
+    params.push(...lessonFormFilter.in)
+  }
+  if (where.kindCode !== undefined && typeof where.kindCode === 'number') {
+    conditions.push(`${col('kindCode')} = ?`)
+    params.push(where.kindCode)
+  }
+  if (where.isCanceled === false) {
+    conditions.push(`${col('isCanceled')} = ${boolFalse}`)
+  }
+  return { conditions, params }
+}
+
+/** Escape a user-supplied search string for use inside a LIKE pattern. */
+function likeEscape(s: string): string {
+  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+}
+
+/** Collect params each time a shared condition snippet is embedded in SQL. */
+function condWithParams(w: SqlWhere, params: (string | number)[]): string {
+  params.push(...w.params)
+  const cond = w.conditions.join(' AND ')
+  // '1=1' keeps the SQL valid when no filters are active (includeCanceled=true).
+  return cond.length > 0 ? cond : '1=1'
 }
 
 /** Compute (minStart, maxEnd) for the dataset to scope defaults. */
@@ -80,145 +196,138 @@ export interface PaginatedResult<T> {
  * Find educator IDs that have at least one event matching the filter range,
  * optionally narrowed by a name LIKE search. Returns a Set for fast lookup.
  *
- * This is the key to scaling to 5000+ teachers: we never load teachers that
- * have no events in the active filter period.
+ * Only primary educators (id > 0) are counted — co-educators (synthetic
+ * negative ids) are excluded from the ranking.
+ *
+ * `SELECT DISTINCT educatorId` streams along the (educatorId, startDateTime)
+ * index — an order of magnitude faster than Prisma's distinct, which loads
+ * every matching event id.
  */
 async function findEducatorIdsWithEvents(
   where: Prisma.ScheduleEventWhereInput,
   search?: string,
+  topLevelUnitId?: number,
 ): Promise<Set<number>> {
-  // Pull distinct educatorIds for events matching the filter. Only primary
-  // educators (id > 0) are counted — co-educators (synthetic negative ids)
-  // are excluded from the ranking.
-  const rows = await db.scheduleEvent.findMany({
-    where: { ...where, educatorId: { gt: 0 } },
-    distinct: ['educatorId'],
-    select: { educatorId: true },
+  return withTiming('analytics:findEducatorIdsWithEvents', async (): Promise<Set<number>> => {
+    const w = sqlEventWhere(where, 'ev')
+    w.conditions.push('ev."educatorId" > 0')
+    const params: (string | number)[] = []
+    const needle = search && search.trim() ? `%${likeEscape(search.trim())}%` : null
+    // Filter by the educator's first-level unit (denormalized on Educator).
+    const unitCondition = (): string => {
+      if (!topLevelUnitId) return ''
+      params.push(topLevelUnitId)
+      return ` AND EXISTS (SELECT 1 FROM "Educator" edu
+                             WHERE edu."id" = ev."educatorId"
+                               AND edu."topLevelUnitId" = ?)`
+    }
+    let sql: string
+    if (needle) {
+      params.push(...w.params)
+      const cond = w.conditions.join(' AND ') + unitCondition()
+      params.push(needle, needle)
+      sql = `SELECT DISTINCT ev."educatorId" AS id
+             FROM "ScheduleEvent" ev
+             JOIN "Educator" ed ON ed."id" = ev."educatorId"
+             WHERE ${cond}
+               AND (ed."displayName" LIKE ? ${likeEscapeClause} OR ed."longName" LIKE ? ${likeEscapeClause})`
+    } else {
+      params.push(...w.params)
+      const cond = w.conditions.join(' AND ') + unitCondition()
+      sql = `SELECT DISTINCT ev."educatorId" AS id
+             FROM "ScheduleEvent" ev
+             WHERE ${cond}`
+    }
+    const rows = (await rawQuery(sql, ...params)) as Array<{ id: number | bigint }>
+    return new Set(rows.map((r) => Number(r.id)))
   })
-  const ids = new Set<number>(rows.map((r) => r.educatorId))
-  if (search && search.trim()) {
-    // Server-side name search: fetch matching educators and intersect.
-    const matched = await db.educator.findMany({
-      where: {
-        id: { in: [...ids] },
-        OR: [
-          { displayName: { contains: search.trim() } },
-          { longName: { contains: search.trim() } },
-        ],
-      },
-      select: { id: true },
-    })
-    return new Set(matched.map((m) => m.id))
-  }
-  return ids
 }
 
 /**
  * Compute per-teacher workload, accounting for simultaneous events.
  *
- * - For each teacher, we group their events by overlapping time (the same
- *   logic used at import time, but re-derived here from `simultaneousGroupId`).
  * - `effectiveMinutes` is the union of the time intervals actually spent
- *   teaching (simultaneous events counted once).
+ *   teaching (simultaneous events counted once): per
+ *   (educatorId, simultaneousGroupId) the interval is MIN(start)…MAX(end),
+ *   and the intervals are summed across groups.
+ * - By default, only teachers with at least one event matching `where` are
+ *   returned — this is the key optimization for universities with 5000+
+ *   teachers (we don't process teachers with no events in the filter period).
  *
- * By default, only teachers with at least one event matching `where` are
- * returned — this is the key optimization for universities with 5000+
- * teachers (we don't process teachers with no events in the filter period).
+ * Implemented as a single GROUP BY aggregation: with 400k+ events, loading
+ * every event into JS costs tens of seconds, SQLite answers this in ~2s.
  */
 export async function computeTeacherWorkloads(
   where: Prisma.ScheduleEventWhereInput,
-  options?: { educatorIds?: number[]; onlyWithEvents?: boolean },
+  options?: { educatorIds?: number[] },
 ): Promise<TeacherWorkload[]> {
-  // Build the educator filter. If caller provided an explicit list of IDs
-  // (e.g. from search), use that. Otherwise, find educators with events.
-  let educatorIds = options?.educatorIds
-  if (!educatorIds && options?.onlyWithEvents !== false) {
-    const idSet = await findEducatorIdsWithEvents(where)
-    educatorIds = [...idSet]
-  }
+  return withTiming('analytics:computeTeacherWorkloads', async () => {
+    const w = sqlEventWhere(where, 'ev')
+    const educatorFilter = (params: (string | number)[]): string => {
+      const ids = options?.educatorIds
+      if (!ids || ids.length === 0) return ''
+      params.push(...ids)
+      return ` AND ev."educatorId" IN (${ids.map(() => '?').join(',')})`
+    }
 
-  const teachers = await db.educator.findMany({
-    where: educatorIds && educatorIds.length > 0 ? { id: { in: educatorIds } } : { id: { gt: 0 } },
-    select: {
-      id: true,
-      displayName: true,
-      longName: true,
-      events: {
-        where,
-        select: {
-          id: true,
-          startDateTime: true,
-          endDateTime: true,
-          durationMinutes: true,
-          simultaneousGroupId: true,
-          hasInferredEnd: true,
-          isCanceled: true,
-        },
-      },
-    },
+    // Prisma raw queries return BigInt for COUNT/SUM aggregates — every
+    // numeric column is mapped through Number() below.
+    const params: (string | number)[] = []
+    const rows = (await rawQuery(
+      `WITH eff AS (
+         SELECT educatorId AS id, SUM(mx - mn) AS effMs
+         FROM (
+           SELECT ev."educatorId" AS educatorId,
+                  MIN(${epochMillis('ev."startDateTime"')}) AS mn,
+                  MAX(${epochMillis('ev."endDateTime"')}) AS mx
+           FROM "ScheduleEvent" ev
+           WHERE ${condWithParams(w, params)}${educatorFilter(params)}
+           GROUP BY ev."educatorId", COALESCE(ev."simultaneousGroupId", 'single-' || ev."id")
+         )
+         GROUP BY educatorId
+       ),
+       base AS (
+         SELECT ev."educatorId" AS id,
+                COUNT(*) AS "eventsCount",
+                SUM(ev."durationMinutes") AS "scheduledMinutes",
+                SUM(CASE WHEN ev."simultaneousGroupId" IS NOT NULL THEN 1 ELSE 0 END) AS "simultaneousEvents",
+                COUNT(DISTINCT ev."simultaneousGroupId") AS "simultaneousGroups",
+                SUM(CASE WHEN ev."hasInferredEnd" THEN 1 ELSE 0 END) AS "inferredEndEvents",
+                SUM(CASE WHEN ev."isCanceled" THEN 1 ELSE 0 END) AS "canceledEvents"
+         FROM "ScheduleEvent" ev
+         WHERE ${condWithParams(w, params)}${educatorFilter(params)}
+         GROUP BY ev."educatorId"
+       )
+       SELECT b.id AS id,
+              ed."displayName" AS "displayName",
+              ed."longName" AS "longName",
+              CAST(b."eventsCount" AS INTEGER) AS "eventsCount",
+              CAST(b."scheduledMinutes" AS INTEGER) AS "scheduledMinutes",
+              CAST(ROUND(COALESCE(eff.effMs, 0) / 60000.0) AS INTEGER) AS "effectiveMinutes",
+              CAST(b."simultaneousEvents" AS INTEGER) AS "simultaneousEvents",
+              CAST(b."simultaneousGroups" AS INTEGER) AS "simultaneousGroups",
+              CAST(b."inferredEndEvents" AS INTEGER) AS "inferredEndEvents",
+              CAST(b."canceledEvents" AS INTEGER) AS "canceledEvents"
+       FROM base b
+       JOIN "Educator" ed ON ed."id" = b.id
+       LEFT JOIN eff ON eff.id = b.id
+       ORDER BY b.id`,
+      ...params,
+    )) as Array<Record<string, unknown>>
+
+    return rows.map((r) => ({
+      id: Number(r.id),
+      displayName: String(r.displayName),
+      longName: String(r.longName),
+      eventsCount: Number(r.eventsCount),
+      scheduledMinutes: Number(r.scheduledMinutes),
+      effectiveMinutes: Number(r.effectiveMinutes),
+      simultaneousEvents: Number(r.simultaneousEvents),
+      simultaneousGroups: Number(r.simultaneousGroups),
+      inferredEndEvents: Number(r.inferredEndEvents),
+      canceledEvents: Number(r.canceledEvents),
+    }))
   })
-
-  const result: TeacherWorkload[] = []
-  for (const t of teachers) {
-    if (t.events.length === 0) {
-      // Even if the teacher has no events after filtering, keep the row so
-      // the caller can see them (e.g. when searching by name). The caller
-      // can decide to filter on `eventsCount > 0`.
-      result.push({
-        id: t.id,
-        displayName: t.displayName,
-        longName: t.longName,
-        eventsCount: 0,
-        scheduledMinutes: 0,
-        effectiveMinutes: 0,
-        simultaneousEvents: 0,
-        simultaneousGroups: 0,
-        inferredEndEvents: 0,
-        canceledEvents: 0,
-      })
-      continue
-    }
-    const scheduledMinutes = t.events.reduce((s, e) => s + e.durationMinutes, 0)
-    const simGroupIds = new Set<string>()
-    let simultaneousEvents = 0
-    let inferredEndEvents = 0
-    let canceledEvents = 0
-
-    // Group by simultaneousGroupId (or singleton by event id).
-    const groups = new Map<string, typeof t.events>()
-    for (const e of t.events) {
-      const k = e.simultaneousGroupId ?? `single-${e.id}`
-      if (!groups.has(k)) groups.set(k, [])
-      groups.get(k)!.push(e)
-      if (e.simultaneousGroupId) {
-        simGroupIds.add(e.simultaneousGroupId)
-        simultaneousEvents++
-      }
-      if (e.hasInferredEnd) inferredEndEvents++
-      if (e.isCanceled) canceledEvents++
-    }
-
-    let effectiveMinutes = 0
-    for (const [, evs] of groups) {
-      const minStart = Math.min(...evs.map((e) => e.startDateTime.getTime()))
-      const maxEnd = Math.max(...evs.map((e) => e.endDateTime.getTime()))
-      effectiveMinutes += (maxEnd - minStart) / 60_000
-    }
-
-    result.push({
-      id: t.id,
-      displayName: t.displayName,
-      longName: t.longName,
-      eventsCount: t.events.length,
-      scheduledMinutes: Math.round(scheduledMinutes),
-      effectiveMinutes: Math.round(effectiveMinutes),
-      simultaneousEvents,
-      simultaneousGroups: simGroupIds.size,
-      inferredEndEvents,
-      canceledEvents,
-    })
-  }
-  return result
 }
 
 function sortTeachers(items: TeacherWorkload[], sort: TeacherSortKey): TeacherWorkload[] {
@@ -270,9 +379,11 @@ export async function computeTeacherWorkloadsPaginated(
     page: number
     pageSize: number
     search?: string
+    /** Restrict the list to educators of this first-level unit. */
+    topLevelUnitId?: number
   },
 ): Promise<PaginatedResult<TeacherWorkload>> {
-  const idSet = await findEducatorIdsWithEvents(where, options.search)
+  const idSet = await findEducatorIdsWithEvents(where, options.search, options.topLevelUnitId)
   if (idSet.size === 0) {
     return { items: [], total: 0, page: options.page, pageSize: options.pageSize, totalPages: 0 }
   }
@@ -300,143 +411,169 @@ export interface RoomWorkload {
 }
 
 /**
- * Find location IDs that have at least one event matching the filter range,
- * optionally narrowed by a name LIKE search.
- */
-async function findLocationIdsWithEvents(
-  where: Prisma.ScheduleEventWhereInput,
-  search?: string,
-): Promise<Set<number>> {
-  // Pull distinct locationIds via the join table filtered by event conditions.
-  const rows = await db.scheduleEventLocation.findMany({
-    where: { event: where },
-    distinct: ['locationId'],
-    select: { locationId: true },
-  })
-  const ids = new Set<number>(rows.map((r) => r.locationId))
-  if (search && search.trim()) {
-    const matched = await db.location.findMany({
-      where: {
-        id: { in: [...ids] },
-        displayName: { contains: search.trim() },
-      },
-      select: { id: true },
-    })
-    return new Set(matched.map((m) => m.id))
-  }
-  return ids
-}
-
-/**
  * Compute per-room workload. Multiple teacher rows for the same physical
  * lecture (same `lectureHash`) are counted once for utilization.
  *
  * `conflicts` is the count of times a room was double-booked (overlapping
  * intervals belonging to *different* physical lectures).
+ *
+ * Reads locations from two arms (see schema — the primary location is
+ * denormalized onto ScheduleEvent.locationId; ScheduleEventLocation holds
+ * only additional ones): the fast arm scans ScheduleEvent without any join,
+ * the extra arm touches the much smaller links table (~52k rows vs 460k).
+ * The conflict sweep runs in JS: lectures are sorted by start time and the
+ * inner loop breaks at the first non-overlapping lecture.
  */
 export async function computeRoomWorkloads(
   where: Prisma.ScheduleEventWhereInput,
   options?: { locationIds?: number[] },
 ): Promise<RoomWorkload[]> {
-  let locationIds = options?.locationIds
-  if (!locationIds) {
-    const idSet = await findLocationIdsWithEvents(where)
-    locationIds = [...idSet]
-  }
+  return withTiming('analytics:computeRoomWorkloads', async () => {
+    const w = sqlEventWhere(where, 'se')
+    const ids = options?.locationIds
+    // An IN-list over locations changes SQLite's plan for the worse once it
+    // grows past ~100 items (measured: IN(200) 3.5s, IN(500) 32s vs 5.9s
+    // unfiltered on a 400k-event dataset). Small lists are cheap, so filter
+    // in SQL; large lists are computed without the filter and narrowed in JS.
+    const useSqlIdFilter = ids !== undefined && ids.length > 0 && ids.length <= 100
+    const idPlaceholders = useSqlIdFilter ? ids.map(() => '?').join(',') : ''
 
-  const locations = await db.location.findMany({
-    where: locationIds && locationIds.length > 0 ? { id: { in: locationIds } } : undefined,
-    include: {
-      events: {
-        where: { event: where },
-        select: {
-          event: {
-            select: {
-              id: true,
-              startDateTime: true,
-              endDateTime: true,
-              durationMinutes: true,
-              lectureHash: true,
-            },
+    const params: (string | number)[] = []
+    // Conditions are embedded once per arm — collect params per embed. The
+    // IN-list filters a different table per arm, hence the two variants.
+    const armWhere = (col: string): string => {
+      let sql = condWithParams(w, params)
+      if (useSqlIdFilter) {
+        params.push(...ids)
+        sql += ` AND ${col}."locationId" IN (${idPlaceholders})`
+      }
+      return sql
+    }
+    const condFast = armWhere('se')
+    const condExtra = armWhere('sel')
+
+    // Dedupe by lectureHash before anything else: the same physical lecture
+    // appears once per student group, and duplicates would inflate both the
+    // totals and the conflict count. (rid, hsh) cannot span arms — extra
+    // links never repeat an event's primary location — the outer GROUP BY
+    // re-merge is just a safety net.
+    const rows = (await rawQuery(
+      `SELECT rid, hsh, SUM("rawCnt") AS "rawCnt", MIN(st) AS st, MAX(en) AS en, MAX(dur) AS dur
+       FROM (
+         SELECT se."locationId" AS rid,
+                se."lectureHash" AS hsh,
+                COUNT(*) AS "rawCnt",
+                MIN(${epochMillis('se."startDateTime"')}) AS st,
+                MAX(${epochMillis('se."endDateTime"')}) AS en,
+                MAX(se."durationMinutes") AS dur
+         FROM "ScheduleEvent" se
+         WHERE se."locationId" IS NOT NULL AND ${condFast}
+         GROUP BY se."locationId", se."lectureHash"
+         UNION ALL
+         SELECT sel."locationId" AS rid,
+                se."lectureHash" AS hsh,
+                COUNT(*) AS "rawCnt",
+                MIN(${epochMillis('se."startDateTime"')}) AS st,
+                MAX(${epochMillis('se."endDateTime"')}) AS en,
+                MAX(se."durationMinutes") AS dur
+         FROM "ScheduleEventLocation" sel
+         JOIN "ScheduleEvent" se ON se."id" = sel."eventId"
+         WHERE (se."locationId" IS NULL OR sel."locationId" <> se."locationId") AND ${condExtra}
+         GROUP BY sel."locationId", se."lectureHash"
+       )
+       GROUP BY rid, hsh
+       ORDER BY rid, st, hsh`,
+      ...params,
+    )) as Array<{ rid: number | bigint; hsh: string; st: number | bigint; en: number | bigint; rawCnt: number | bigint; dur: number | bigint }>
+
+    interface Lect {
+      rid: number
+      hsh: string
+      rawCnt: number
+      st: number
+      en: number
+      dur: number
+    }
+    const byRoom = new Map<number, { room: RoomWorkload; lectures: Lect[] }>()
+    for (const r of rows) {
+      const rid = Number(r.rid)
+      let entry = byRoom.get(rid)
+      if (!entry) {
+        entry = {
+          room: {
+            id: rid,
+            displayName: '',
+            eventsCount: 0,
+            uniqueLectures: 0,
+            totalMinutes: 0,
+            conflicts: 0,
+            latitude: null,
+            longitude: null,
           },
-        },
-      },
-    },
-  })
-
-  const result: RoomWorkload[] = []
-  for (const l of locations) {
-    if (l.events.length === 0) {
-      result.push({
-        id: l.id,
-        displayName: l.displayName,
-        eventsCount: 0,
-        uniqueLectures: 0,
-        totalMinutes: 0,
-        conflicts: 0,
-        latitude: l.latitude,
-        longitude: l.longitude,
+          lectures: [],
+        }
+        byRoom.set(rid, entry)
+      }
+      const rawCnt = Number(r.rawCnt)
+      entry.room.eventsCount += rawCnt
+      entry.room.uniqueLectures += 1
+      entry.room.totalMinutes += Number(r.dur)
+      entry.lectures.push({
+        rid,
+        hsh: String(r.hsh),
+        rawCnt,
+        st: Number(r.st),
+        en: Number(r.en),
+        dur: Number(r.dur),
       })
-      continue
     }
-    // Dedupe by lectureHash → unique physical lectures.
-    //
-    // NOTE: the same physical lecture appears multiple times in `l.events`
-    // — once for each student group that attends it. We MUST dedupe by
-    // `lectureHash` BEFORE building the `lectures` array and BEFORE the
-    // conflict-detection loop, otherwise:
-    //   - each duplicate is treated as a separate "lecture" and the conflict
-    //     loop counts the same pair of overlapping lectures N×M times
-    //     (where N, M are the duplicate counts of the two lectures);
-    //   - the conflict count on the rooms ranking page diverges from the
-    //     conflict count on the room detail page (which dedupes correctly).
-    //
-    // The `seen` Set is also used for the `uniqueLectures` count below.
-    const seen = new Set<string>()
-    let totalMinutes = 0
-    const lectures: { start: number; end: number; hash: string }[] = []
-    for (const le of l.events) {
-      const ev = le.event
-      if (seen.has(ev.lectureHash)) continue
-      seen.add(ev.lectureHash)
-      lectures.push({ start: ev.startDateTime.getTime(), end: ev.endDateTime.getTime(), hash: ev.lectureHash })
-      totalMinutes += ev.durationMinutes
-    }
-    // Detect conflicts: same room, overlapping intervals, DIFFERENT lectureHash.
-    // NOTE: intervals that merely touch at a boundary (b.start === a.end, e.g.
-    // 13:00–14:00 then 14:00–15:00) are NOT a conflict — those are back-to-back
-    // classes. We use `>=` so that b.start === a.end triggers the break and no
-    // conflict is recorded.
-    lectures.sort((a, b) => a.start - b.start)
-    let conflicts = 0
-    for (let i = 0; i < lectures.length; i++) {
-      for (let j = i + 1; j < lectures.length; j++) {
-        const a = lectures[i]
-        const b = lectures[j]
-        if (b.start >= a.end) break // sorted, no further overlap
-        // `a.hash !== b.hash` is now guaranteed true because we deduped
-        // by lectureHash above — but keep the check for clarity / safety.
-        if (a.hash !== b.hash) conflicts++
+
+    // Room display names / coordinates in one small query.
+    const roomIds = [...byRoom.keys()]
+    if (roomIds.length > 0) {
+      const meta = (await rawQuery(
+        `SELECT "id", "displayName", "latitude", "longitude" FROM "Location"
+         WHERE "id" IN (${roomIds.map(() => '?').join(',')})`,
+        ...roomIds,
+      )) as Array<{ id: number | bigint; displayName: string; latitude: number | null; longitude: number | null }>
+      for (const m of meta) {
+        const entry = byRoom.get(Number(m.id))
+        if (entry) {
+          entry.room.displayName = String(m.displayName)
+          entry.room.latitude = m.latitude === null ? null : Number(m.latitude)
+          entry.room.longitude = m.longitude === null ? null : Number(m.longitude)
+        }
       }
     }
-    result.push({
-      id: l.id,
-      displayName: l.displayName,
-      // `eventsCount` is the number of `ScheduleEvent` rows linked to this
-      // room — including duplicates of the same physical lecture that
-      // appear once per student group. This matches `room.events.length`
-      // in the room detail endpoint so the two pages stay consistent.
-      eventsCount: l.events.length,
-      // `uniqueLectures` is the count of DISTINCT physical lectures
-      // (one per `lectureHash`) — deduped above.
-      uniqueLectures: seen.size,
-      totalMinutes,
-      conflicts,
-      latitude: l.latitude,
-      longitude: l.longitude,
-    })
-  }
-  return result
+
+    // Conflicts: pairs of different lectures in the same room whose intervals
+    // overlap. Rows are ordered by (rid, st, hsh); for each lecture i the
+    // inner pointer j starts at i+1 and stops at the first lecture starting
+    // at/after en_i — O(L + pairs) instead of O(L²).
+    const result: RoomWorkload[] = []
+    for (const { room, lectures } of byRoom.values()) {
+      let conflicts = 0
+      for (let i = 0; i < lectures.length; i++) {
+        const a = lectures[i]
+        for (let j = i + 1; j < lectures.length; j++) {
+          const b = lectures[j]
+          if (b.st >= a.en) break
+          // (rid, hsh) is unique in the deduped set, so b.hsh !== a.hsh
+          // always holds here — no check needed.
+          conflicts++
+        }
+      }
+      room.conflicts = conflicts
+      result.push(room)
+    }
+
+    if (ids !== undefined && !useSqlIdFilter) {
+      // Narrow the full computation down to the requested rooms.
+      const wanted = new Set(ids)
+      return result.filter((r) => wanted.has(r.id))
+    }
+    return result
+  })
 }
 
 function sortRooms(items: RoomWorkload[], sort: RoomSortKey): RoomWorkload[] {
@@ -473,9 +610,11 @@ export async function computeRoomWorkloadsPaginated(
     page: number
     pageSize: number
     search?: string
+    /** Restrict the ranking to rooms at these addresses (Address.id list). */
+    addressIds?: number[]
   },
 ): Promise<PaginatedResult<RoomWorkload>> {
-  const idSet = await findLocationIdsWithEvents(where, options.search)
+  const idSet = await findLocationIdsWithEvents(where, options.search, options.addressIds)
   if (idSet.size === 0) {
     return { items: [], total: 0, page: options.page, pageSize: options.pageSize, totalPages: 0 }
   }
@@ -489,6 +628,58 @@ export async function computeRoomWorkloadsPaginated(
   const start = (page - 1) * pageSize
   const items = sorted.slice(start, start + pageSize)
   return { items, total, page, pageSize, totalPages }
+}
+
+/**
+ * Find location IDs that have at least one event matching the filter range,
+ * optionally narrowed by a name LIKE search and/or by the parsed address
+ * (Address.id list).
+ *
+ * Two arms (see schema): events' denormalized primary location, plus the
+ * additional-location links table (~52k rows).
+ */
+async function findLocationIdsWithEvents(
+  where: Prisma.ScheduleEventWhereInput,
+  search?: string,
+  addressIds?: number[],
+): Promise<Set<number>> {
+  return withTiming('analytics:findLocationIdsWithEvents', async (): Promise<Set<number>> => {
+    const w = sqlEventWhere(where, 'se')
+    const params: (string | number)[] = []
+    const needle = search && search.trim() ? `%${likeEscape(search.trim())}%` : null
+    const addrIds = addressIds ?? []
+    const useAddressJoin = addrIds.length > 0
+    const usesLocJoin = Boolean(needle) || useAddressJoin
+    // Embeds the conditions (and the search/address params) once per arm.
+    const armWhere = (col: string): string => {
+      let sql = condWithParams(w, params)
+      if (needle) {
+        params.push(needle)
+        sql += ` AND l."displayName" LIKE ? ${likeEscapeClause}`
+      }
+      if (useAddressJoin) {
+        params.push(...addrIds)
+        sql += ` AND l."addressId" IN (${addrIds.map(() => '?').join(',')})`
+      }
+      return sql
+    }
+    const locJoinFast = usesLocJoin ? `JOIN "Location" l ON l."id" = se."locationId"` : ''
+    const locJoinExtra = usesLocJoin ? `JOIN "Location" l ON l."id" = sel."locationId"` : ''
+    const extraGuard = `(se."locationId" IS NULL OR sel."locationId" <> se."locationId")`
+
+    const sql = `SELECT DISTINCT rid AS id FROM (
+       SELECT se."locationId" AS rid
+         FROM "ScheduleEvent" se ${locJoinFast}
+        WHERE se."locationId" IS NOT NULL AND ${armWhere('se')}
+       UNION ALL
+       SELECT sel."locationId" AS rid
+         FROM "ScheduleEventLocation" sel
+         JOIN "ScheduleEvent" se ON se."id" = sel."eventId" ${locJoinExtra}
+        WHERE ${extraGuard} AND ${armWhere('sel')}
+     )`
+    const rows = (await rawQuery(sql, ...params)) as Array<{ id: number | bigint }>
+    return new Set(rows.map((r) => Number(r.id)))
+  })
 }
 
 /** Build a YYYY-ISO-week string from a Date. */
@@ -527,73 +718,64 @@ export interface TimelineBucket {
   effectiveMinutes: number
 }
 
+/** SQLite/PostgreSQL-agnostic bucket key expression (see sql-dialect.ts). */
+function timelineBucketExpr(granularity: 'day' | 'week'): string {
+  return granularity === 'day'
+    ? dayBucketExpr('"startDateTime"')
+    : isoWeekBucketExpr('"startDateTime"')
+}
+
+/**
+ * Aggregate events into buckets (by day or week) for the timeline chart.
+ * Single GROUP BY: events and scheduled minutes are event-level; effective
+ * minutes are per (bucket, educator, simultaneous group) MIN(start)/MAX(end)
+ * union, summed per bucket. Simultaneous groups share the same time slot, so
+ * they never span buckets.
+ */
 export async function computeTimeline(
   where: Prisma.ScheduleEventWhereInput,
   granularity: 'day' | 'week' = 'week',
 ): Promise<TimelineBucket[]> {
-  const events = await db.scheduleEvent.findMany({
-    where,
-    select: { startDateTime: true, endDateTime: true, durationMinutes: true, simultaneousGroupId: true, id: true, educatorId: true },
-    orderBy: { startDateTime: 'asc' },
+  return withTiming('analytics:timeline:compute', async () => {
+    const w = sqlEventWhere(where)
+    const params: (string | number)[] = []
+    const cond = condWithParams(w, params)
+    const rows = (await rawQuery(
+      `SELECT bk AS key,
+              CAST(SUM(cnt) AS INTEGER) AS events,
+              CAST(SUM(sched) AS INTEGER) AS "scheduledMinutes",
+              CAST(ROUND(SUM(mx - mn) / 60000.0) AS INTEGER) AS "effectiveMinutes"
+       FROM (
+         SELECT ${timelineBucketExpr(granularity)} AS bk,
+                COUNT(*) AS cnt,
+                SUM("durationMinutes") AS sched,
+                MIN(${epochMillis('"startDateTime"')}) AS mn,
+                MAX(${epochMillis('"endDateTime"')}) AS mx
+         FROM "ScheduleEvent"
+         WHERE ${cond}
+         GROUP BY bk, "educatorId", COALESCE("simultaneousGroupId", 'single-' || "id")
+       )
+       GROUP BY bk
+       ORDER BY bk`,
+      ...params,
+    )) as Array<Record<string, unknown>>
+
+    return rows.map((r) => ({
+      key: String(r.key),
+      date: String(r.key),
+      events: Number(r.events),
+      scheduledMinutes: Number(r.scheduledMinutes),
+      effectiveMinutes: Number(r.effectiveMinutes),
+    }))
   })
-  // Group by bucket key
-  const byBucket = new Map<string, typeof events>()
-  for (const e of events) {
-    const key = granularity === 'day' ? dayKey(e.startDateTime) : isoWeek(e.startDateTime).label
-    if (!byBucket.has(key)) byBucket.set(key, [])
-    byBucket.get(key)!.push(e)
-  }
-  // Within each bucket, also dedupe by simultaneous group per teacher.
-  const out: TimelineBucket[] = []
-  for (const [key, evs] of byBucket) {
-    const simGroups = new Map<string, { start: number; end: number }>()
-    const singletons: { start: number; end: number }[] = []
-    for (const e of evs) {
-      const k = e.simultaneousGroupId ?? `single-${e.id}`
-      const start = e.startDateTime.getTime()
-      const end = e.endDateTime.getTime()
-      if (e.simultaneousGroupId) {
-        if (!simGroups.has(k)) simGroups.set(k, { start, end })
-        else {
-          const cur = simGroups.get(k)!
-          cur.start = Math.min(cur.start, start)
-          cur.end = Math.max(cur.end, end)
-        }
-      } else {
-        singletons.push({ start, end })
-      }
-    }
-    let effectiveMinutes = 0
-    for (const [, g] of simGroups) effectiveMinutes += (g.end - g.start) / 60_000
-    for (const s of singletons) effectiveMinutes += (s.end - s.start) / 60_000
-    const scheduledMinutes = evs.reduce((s, e) => s + e.durationMinutes, 0)
-    out.push({
-      key,
-      date: granularity === 'day' ? key : `${key.split('-')[0]}-${key.split('-').slice(1).join('-')}`,
-      events: evs.length,
-      scheduledMinutes: Math.round(scheduledMinutes),
-      effectiveMinutes: Math.round(effectiveMinutes),
-    })
-  }
-  out.sort((a, b) => (a.key < b.key ? -1 : 1))
-  return out
 }
 
 /**
- * Compute the KPI totals efficiently using SQL aggregation, so the overview
- * endpoint doesn't need to load the full per-teacher workloads (which would
- * be expensive with 5000+ teachers).
- *
- * Returns:
- *  - teachersCount: distinct educatorId (id > 0) with events in range
- *  - roomsCount: distinct locationId with events in range
- *  - eventsCount: COUNT(*) of events in range
- *  - scheduledMinutes: SUM(durationMinutes)
- *  - effectiveMinutes: deduped by (educatorId, simultaneousGroupId) using
- *    MIN(start) and MAX(end) per group, then summed across groups
- *  - simultaneousEvents: COUNT where simultaneousGroupId IS NOT NULL
- *  - simultaneousGroups: COUNT DISTINCT simultaneousGroupId
- *  - inferredEndEvents: COUNT where hasInferredEnd
+ * Compute the KPI totals as a single raw aggregation query. Previously these
+ * were Prisma aggregate/count calls — each wrapped in a `LIMIT/OFFSET`
+ * subquery that scanned all 400k+ events (measured ~13s per COUNT) — plus a
+ * full event load for the effective-minutes dedup. The same numbers in one
+ * GROUP BY query take ~1-2s.
  */
 export interface OverviewKpis {
   teachersCount: number
@@ -611,75 +793,148 @@ export interface OverviewKpis {
 export async function computeOverviewKpis(
   where: Prisma.ScheduleEventWhereInput,
 ): Promise<OverviewKpis> {
-  const primaryWhere: Prisma.ScheduleEventWhereInput = { ...where, educatorId: { gt: 0 } }
-
-  // Run all independent aggregations in parallel.
-  const [
-    eventsCount,
-    scheduledAgg,
-    teachersRows,
-    roomsRows,
-    simultaneousEvents,
-    simultaneousGroupsRows,
-    inferredEndEvents,
-    subjectsCount,
-    groupsCount,
-    effectiveGroups,
-  ] = await Promise.all([
-    db.scheduleEvent.count({ where }),
-    db.scheduleEvent.aggregate({ where, _sum: { durationMinutes: true } }),
-    db.scheduleEvent.findMany({ where: primaryWhere, distinct: ['educatorId'], select: { educatorId: true } }),
-    db.scheduleEventLocation.findMany({ where: { event: where }, distinct: ['locationId'], select: { locationId: true } }),
-    db.scheduleEvent.count({ where: { ...where, simultaneousGroupId: { not: null } } }),
-    db.scheduleEvent.findMany({
-      where: { ...where, simultaneousGroupId: { not: null } },
-      distinct: ['simultaneousGroupId'],
-      select: { simultaneousGroupId: true },
-    }),
-    db.scheduleEvent.count({ where: { ...where, hasInferredEnd: true } }),
-    db.subject.count(),
-    db.group.count(),
-    // Effective minutes: per (educatorId, simultaneousGroupId) compute the
-    // MIN(start) and MAX(end). For singleton events (simultaneousGroupId IS
-    // NULL), each event is its own group — use `id` as the unique key.
-    db.scheduleEvent.findMany({
-      where,
-      select: {
-        educatorId: true,
-        simultaneousGroupId: true,
-        id: true,
-        startDateTime: true,
-        endDateTime: true,
-      },
-    }),
-  ])
-
-  // Compute effective minutes in JS: group by (educatorId, simultaneousGroupId ?? `single-${id}`).
-  const effMap = new Map<string, { start: number; end: number }>()
-  for (const e of effectiveGroups) {
-    const key = `${e.educatorId}|${e.simultaneousGroupId ?? `single-${e.id}`}`
-    const start = e.startDateTime.getTime()
-    const end = e.endDateTime.getTime()
-    const cur = effMap.get(key)
-    if (!cur) effMap.set(key, { start, end })
-    else {
-      cur.start = Math.min(cur.start, start)
-      cur.end = Math.max(cur.end, end)
+  return withTiming('analytics:overviewKpis:sql-agg', async () => {
+    const w = sqlEventWhere(where)
+    const params: (string | number)[] = []
+    const cond = () => condWithParams(w, params)
+    const rows = (await rawQuery(
+      `SELECT
+         (SELECT COUNT(*) FROM "ScheduleEvent" ev WHERE ${cond()}) AS "eventsCount",
+         (SELECT COALESCE(SUM(ev."durationMinutes"), 0) FROM "ScheduleEvent" ev WHERE ${cond()}) AS "scheduledMinutes",
+         (SELECT COUNT(DISTINCT ev."educatorId") FROM "ScheduleEvent" ev WHERE ${cond()} AND ev."educatorId" > 0) AS "teachersCount",
+         (SELECT COUNT(*) FROM (
+            SELECT DISTINCT "locationId" AS rid
+              FROM "ScheduleEvent"
+             WHERE ${cond()} AND "locationId" IS NOT NULL
+            UNION
+            SELECT DISTINCT sel."locationId" AS rid
+              FROM "ScheduleEventLocation" sel
+              JOIN "ScheduleEvent" se ON se."id" = sel."eventId"
+             WHERE (se."locationId" IS NULL OR sel."locationId" <> se."locationId") AND ${cond()}
+          )) AS "roomsCount",
+         (SELECT COUNT(*) FROM "ScheduleEvent" ev WHERE ${cond()} AND ev."simultaneousGroupId" IS NOT NULL) AS "simultaneousEvents",
+         (SELECT COUNT(DISTINCT ev."simultaneousGroupId") FROM "ScheduleEvent" ev WHERE ${cond()} AND ev."simultaneousGroupId" IS NOT NULL) AS "simultaneousGroups",
+         (SELECT COUNT(*) FROM "ScheduleEvent" ev WHERE ${cond()} AND ev."hasInferredEnd") AS "inferredEndEvents",
+         (SELECT COUNT(*) FROM "Subject") AS "subjectsCount",
+         (SELECT COUNT(*) FROM "Group") AS "groupsCount",
+         (SELECT COALESCE(SUM(mx - mn), 0) FROM (
+            SELECT MIN(${epochMillis('ev."startDateTime"')}) AS mn, MAX(${epochMillis('ev."endDateTime"')}) AS mx
+            FROM "ScheduleEvent" ev
+            WHERE ${cond()}
+            GROUP BY ev."educatorId", COALESCE(ev."simultaneousGroupId", 'single-' || ev."id")
+          )) AS "effectiveMs"`,
+      ...params,
+    )) as Array<Record<string, unknown>>
+    const r = rows[0]
+    return {
+      teachersCount: Number(r.teachersCount),
+      roomsCount: Number(r.roomsCount),
+      eventsCount: Number(r.eventsCount),
+      scheduledMinutes: Number(r.scheduledMinutes),
+      effectiveMinutes: Math.round(Number(r.effectiveMs) / 60_000),
+      simultaneousEvents: Number(r.simultaneousEvents),
+      simultaneousGroups: Number(r.simultaneousGroups),
+      inferredEndEvents: Number(r.inferredEndEvents),
+      subjectsCount: Number(r.subjectsCount),
+      groupsCount: Number(r.groupsCount),
     }
-  }
-  let effectiveMinutes = 0
-  for (const [, g] of effMap) effectiveMinutes += (g.end - g.start) / 60_000
+  })
+}
 
-  return {
-    teachersCount: teachersRows.length,
-    roomsCount: roomsRows.length,
-    eventsCount,
-    scheduledMinutes: scheduledAgg._sum.durationMinutes ?? 0,
-    effectiveMinutes: Math.round(effectiveMinutes),
-    simultaneousEvents,
-    simultaneousGroups: simultaneousGroupsRows.length,
-    inferredEndEvents,
-    subjectsCount,
-    groupsCount,
-  }
+/** Month names in Russian (1-indexed for clarity). */
+const MONTH_NAMES_RU = [
+  '', 'Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн',
+  'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек',
+]
+
+/**
+ * Aggregate events by (month, kindCode) using raw SQL — much faster than
+ * pulling all events into JS and grouping there. Returns a flat array of
+ * `{ month, monthLabel, kindCode, count }` rows sorted by month.
+ */
+export async function computeByMonthByKind(
+  where: Prisma.ScheduleEventWhereInput,
+): Promise<{ month: number; monthLabel: string; kindCode: number; count: number }[]> {
+  const w = sqlEventWhere(where)
+  const params: (string | number)[] = []
+  const cond = condWithParams(w, params)
+  const whereClause = cond.length > 0 ? `WHERE ${cond}` : ''
+
+  // Note: COUNT(*) returns a BigInt in better-sqlite3 / Prisma raw queries,
+  // so we wrap it in `CAST(... AS INTEGER)` to get a JS number.
+  const rows = (await withTiming(
+    'analytics:byMonthByKind:sql',
+    () =>
+      rawQuery(
+        `SELECT ${monthExpr('"startDateTime"')} AS month,
+            "kindCode",
+            CAST(COUNT(*) AS INTEGER) AS count
+       FROM "ScheduleEvent"
+       ${whereClause}
+       GROUP BY month, "kindCode"
+       ORDER BY month ASC, "kindCode" ASC`,
+        ...params,
+      ) as Promise<Array<{ month: number; kindCode: number; count: number }>>,
+  )) as Array<{ month: number; kindCode: number; count: number }>
+
+  return rows.map((r) => ({
+    // SQLite returns BigInt for COUNT and CAST-INTEGER columns even when
+    // we CAST them. Coerce to Number for JS-friendly JSON serialization.
+    month: Number(r.month),
+    monthLabel: MONTH_NAMES_RU[Number(r.month)] ?? `М${r.month}`,
+    kindCode: Number(r.kindCode),
+    count: Number(r.count),
+  }))
+}
+
+export interface HeatmapCell {
+  day: number
+  dayName: string
+  hour: number
+  events: number
+  simultaneous: number
+}
+
+/**
+ * 7×24 grid (day of week × hour) of event counts for the heatmap card.
+ * Single GROUP BY query; the grid is filled from the ~100 non-empty
+ * (day, hour) rows instead of materializing every event.
+ */
+export async function computeHeatmap(
+  where: Prisma.ScheduleEventWhereInput,
+): Promise<HeatmapCell[][]> {
+  return withTiming('analytics:heatmap:compute', async () => {
+    const w = sqlEventWhere(where, 'ev')
+    const params: (string | number)[] = []
+    const cond = condWithParams(w, params)
+    const rows = (await rawQuery(
+      `SELECT ev."dayOfWeek" AS day,
+              ${hourExpr('ev."startDateTime"')} AS hour,
+              CAST(COUNT(*) AS INTEGER) AS events,
+              CAST(SUM(CASE WHEN ev."simultaneousGroupId" IS NOT NULL THEN 1 ELSE 0 END) AS INTEGER) AS simultaneous
+       FROM "ScheduleEvent" ev
+       WHERE ${cond}
+       GROUP BY ev."dayOfWeek", hour`,
+      ...params,
+    )) as Array<{ day: number; hour: number; events: number; simultaneous: number }>
+
+    const heatmap: HeatmapCell[][] = Array.from({ length: 7 }, (_, d) =>
+      Array.from({ length: 24 }, (_, h) => ({
+        day: d + 1,
+        dayName: dayName(d + 1),
+        hour: h,
+        events: 0,
+        simultaneous: 0,
+      })),
+    )
+    for (const r of rows) {
+      const d = Number(r.day)
+      const h = Number(r.hour)
+      if (d >= 1 && d <= 7 && h >= 0 && h < 24) {
+        heatmap[d - 1][h].events = Number(r.events)
+        heatmap[d - 1][h].simultaneous = Number(r.simultaneous)
+      }
+    }
+    return heatmap
+  })
 }

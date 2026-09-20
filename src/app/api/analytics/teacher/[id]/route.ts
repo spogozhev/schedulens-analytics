@@ -11,8 +11,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
 
   const url = new URL(request.url)
   const filters: CommonFilters = {
-    from: url.searchParams.get('from'),
-    to: url.searchParams.get('to'),
+    dateRangeIds: url.searchParams.get('dateRangeIds'),
     kindCode: url.searchParams.get('kindCode'),
     includeCanceled: url.searchParams.get('includeCanceled') ?? 'false',
   }
@@ -21,6 +20,10 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   const teacher = await db.educator.findUnique({
     where: { id },
     include: {
+      employments: {
+        select: { position: true, department: { select: { name: true } } },
+        orderBy: [{ department: { name: 'asc' } }, { position: 'asc' }],
+      },
       events: {
         where,
         select: {
@@ -184,9 +187,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     id: teacher.id,
     displayName: teacher.displayName,
     longName: teacher.longName,
-    scheduleFrom: teacher.scheduleFrom?.toISOString() ?? null,
-    scheduleTo: teacher.scheduleTo?.toISOString() ?? null,
-    isSpringTerm: teacher.isSpringTerm,
+    employments: teacher.employments,
     kpis: {
       eventsCount: events.length,
       scheduledHours: Math.round((scheduledMinutes / 60) * 10) / 10,

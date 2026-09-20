@@ -25,7 +25,7 @@ import { MiniBar } from './charts'
 import { PaginationFooter, useDebouncedValue } from './pagination-footer'
 import { formatHours, formatNumber } from './palette'
 import { useDashboardStore, buildFilterQuery } from '@/lib/dashboard-store'
-import { useTeachers } from '@/lib/api-hooks'
+import { useTeachers, useTopLevelUnits } from '@/lib/api-hooks'
 import type { TeacherSortKey } from '@/lib/analytics'
 
 export function TeachersTab() {
@@ -36,11 +36,15 @@ export function TeachersTab() {
   const [pageSize, setPageSize] = React.useState(25)
   const [searchInput, setSearchInput] = React.useState('')
   const search = useDebouncedValue(searchInput, 300)
+  const [topLevelUnitId, setTopLevelUnitId] = React.useState<string>('all')
+  const { data: unitsMeta } = useTopLevelUnits()
 
   // Reset to first page whenever any filter changes.
-  React.useEffect(() => setPage(1), [filters, sort, search, pageSize])
+  React.useEffect(() => setPage(1), [filters, sort, search, pageSize, topLevelUnitId])
 
-  const query = buildFilterQuery(filters)
+  const baseQuery = buildFilterQuery(filters)
+  const query =
+    topLevelUnitId !== 'all' ? `${baseQuery}&topLevelUnitId=${topLevelUnitId}` : baseQuery
   const { data, isLoading, error, isFetching } = useTeachers(query, { page, pageSize, sort, search })
 
   const items = (data?.items ?? []) as Array<{
@@ -74,6 +78,29 @@ export function TeachersTab() {
       {/* Controls */}
       <Card>
         <CardContent className="py-3 flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">Подразделение</span>
+            <Select
+              value={topLevelUnitId}
+              onValueChange={(v) => {
+                setTopLevelUnitId(v)
+                setPage(1)
+              }}
+            >
+              <SelectTrigger className="w-[280px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Все подразделения</SelectItem>
+                {(unitsMeta?.topLevelUnits ?? []).map((u) => (
+                  <SelectItem key={u.id} value={String(u.id)}>
+                    {u.name} ({formatNumber(u.educatorCount)})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
           <div className="flex flex-col gap-1.5">
             <span className="text-xs text-muted-foreground">Сортировка</span>
             <Select value={sort} onValueChange={(v) => setSort(v as TeacherSortKey)}>

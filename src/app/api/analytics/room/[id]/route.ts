@@ -11,39 +11,39 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
 
   const url = new URL(request.url)
   const filters: CommonFilters = {
-    from: url.searchParams.get('from'),
-    to: url.searchParams.get('to'),
+    dateRangeIds: url.searchParams.get('dateRangeIds'),
     kindCode: url.searchParams.get('kindCode'),
     includeCanceled: url.searchParams.get('includeCanceled') ?? 'false',
   }
   const where = buildEventWhere(filters)
 
-  const room = await db.location.findUnique({
-    where: { id },
-    include: {
-      events: {
-        where: { event: where },
-        select: {
-          event: {
-            select: {
-              id: true,
-              startDateTime: true,
-              endDateTime: true,
-              durationMinutes: true,
-              lectureHash: true,
-              dayOfWeek: true,
-              kindCode: true,
-              isCanceled: true,
-              subject: { select: { name: true } },
-              educator: { select: { id: true, displayName: true, longName: true } },
-              groups: { include: { group: { select: { name: true } } } },
-            },
-          },
-        },
-      },
-    },
-  })
+  const eventSelect = {
+    id: true,
+    startDateTime: true,
+    endDateTime: true,
+    durationMinutes: true,
+    lectureHash: true,
+    dayOfWeek: true,
+    kindCode: true,
+    isCanceled: true,
+    subject: { select: { name: true } },
+    educator: { select: { id: true, displayName: true, longName: true } },
+    groups: { include: { group: { select: { name: true } } } },
+  } as const
+
+  // Events of this room come from two places (see schema): the denormalized
+  // primary location on the event, and the additional-location links.
+  // An event lands in exactly one of the two lists for a given room.
+  const [room, primaryEvents, extraEvents] = await Promise.all([
+    db.location.findUnique({ where: { id } }),
+    db.scheduleEvent.findMany({ where: { ...where, locationId: id }, select: eventSelect }),
+    db.scheduleEvent.findMany({
+      where: { ...where, locations: { some: { locationId: id } } },
+      select: eventSelect,
+    }),
+  ])
   if (!room) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  const allEvents = [...primaryEvents, ...extraEvents]
 
   // Dedupe by lectureHash — each physical lecture is one utilization slot.
   // (Multiple rows for the same physical lecture differ only by audience
@@ -64,8 +64,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     educatorLongName: string
     groups: string[]
   }[] = []
-  for (const le of room.events) {
-    const ev = le.event
+  for (const ev of allEvents) {
     if (seen.has(ev.lectureHash)) continue
     seen.add(ev.lectureHash)
     lectures.push({
@@ -112,7 +111,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   }
 
   const totalMinutes = lectures.reduce((s, l) => s + l.minutes, 0)
-  const eventsCount = room.events.length
+  const eventsCount = allEvents.length
 
   // Conflicts: overlapping intervals, different hashes.
   // NOTE: back-to-back lectures (a.end === b.start) are NOT a conflict —
