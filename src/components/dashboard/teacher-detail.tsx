@@ -160,7 +160,7 @@ export function TeacherDetailDialog() {
                   <CardHeader>
                     <CardTitle className="text-sm flex items-center gap-2">
                       <Layers className="h-4 w-4 text-orange-600 dark:text-orange-400" />
-                      Одновременные группы (показано {data.simultaneousGroups.length} из {data.kpis.simultaneousGroups})
+                      Одновременные события (показано {data.simultaneousGroups.length} из {data.kpis.simultaneousGroups})
                     </CardTitle>
                     <CardDescription>
                       Каждый блок — это время, когда преподаватель ведёт несколько занятий одновременно

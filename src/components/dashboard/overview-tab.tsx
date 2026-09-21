@@ -280,8 +280,8 @@ export function OverviewTab() {
 
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle className="text-base">По формам занятий</CardTitle>
-            <CardDescription>Распределение событий по форме проведения</CardDescription>
+            <CardTitle className="text-base">По видам занятий</CardTitle>
+            <CardDescription>Распределение событий по видам проведения</CardDescription>
           </CardHeader>
           <CardContent>
             <QuerySection query={byLessonFormQ} skeleton={<ChartSkeleton height={400} />}>
