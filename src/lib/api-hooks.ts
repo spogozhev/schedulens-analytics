@@ -197,16 +197,20 @@ export interface PaginationParams {
   search: string
 }
 
-export function useTeachers(filters: string, params: PaginationParams) {
+/** Hour units for the teachers rating table (academic = astronomical × 4/3). */
+export type HoursMode = 'astronomical' | 'academic'
+
+export function useTeachers(filters: string, params: PaginationParams, hoursMode: HoursMode = 'astronomical') {
   const query = new URLSearchParams({
     ...(filters ? Object.fromEntries(new URLSearchParams(filters)) : {}),
     sort: params.sort,
     page: String(params.page),
     pageSize: String(params.pageSize),
     search: params.search,
+    ...(hoursMode === 'academic' ? { hours: 'academic' } : {}),
   }).toString()
   return useQuery({
-    queryKey: ['teachers', filters, params],
+    queryKey: ['teachers', filters, params, hoursMode],
     queryFn: () => fetchJson(`${API_BASE}/teachers?${query}`),
     // Keep previous page's data while loading the next page (smoother UX).
     placeholderData: (prev) => prev,

@@ -25,7 +25,7 @@ import { MiniBar } from './charts'
 import { PaginationFooter, useDebouncedValue } from './pagination-footer'
 import { formatHours, formatNumber } from './palette'
 import { useDashboardStore, buildFilterQuery } from '@/lib/dashboard-store'
-import { useTeachers, useTopLevelUnits } from '@/lib/api-hooks'
+import { useTeachers, useTopLevelUnits, type HoursMode } from '@/lib/api-hooks'
 import type { TeacherSortKey } from '@/lib/analytics'
 
 export function TeachersTab() {
@@ -37,6 +37,8 @@ export function TeachersTab() {
   const [searchInput, setSearchInput] = React.useState('')
   const search = useDebouncedValue(searchInput, 300)
   const [topLevelUnitId, setTopLevelUnitId] = React.useState<string>('all')
+  // Astronomical by default; academic converts hours ×4/3 (90 astr. min = 120 acad. min).
+  const [hoursMode, setHoursMode] = React.useState<HoursMode>('astronomical')
   const { data: unitsMeta } = useTopLevelUnits()
 
   // Reset to first page whenever any filter changes.
@@ -45,7 +47,11 @@ export function TeachersTab() {
   const baseQuery = buildFilterQuery(filters)
   const query =
     topLevelUnitId !== 'all' ? `${baseQuery}&topLevelUnitId=${topLevelUnitId}` : baseQuery
-  const { data, isLoading, error, isFetching } = useTeachers(query, { page, pageSize, sort, search })
+  const { data, isLoading, error, isFetching } = useTeachers(
+    query,
+    { page, pageSize, sort, search },
+    hoursMode,
+  )
 
   const items = (data?.items ?? []) as Array<{
     id: number
@@ -147,9 +153,24 @@ export function TeachersTab() {
             Эффективные часы — это сумма интервалов времени преподавателя без двойного учёта
             одновременных занятий. Запланированные — это прямая сумма длительностей всех событий.
             Загрузка выполняется страницами (по {pageSize} на страницу), поиск — серверный.
+            {hoursMode === 'academic' &&
+              ' Часы показаны академические: 90 астрономических минут = 120 академических (×4/3).'}
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {/* Hour-unit selector for this table: astronomical or academic (×4/3). */}
+          <div className="flex items-center justify-end gap-2 pb-3">
+            <span className="text-xs text-muted-foreground">Часы</span>
+            <Select value={hoursMode} onValueChange={(v) => setHoursMode(v as HoursMode)}>
+              <SelectTrigger className="w-[220px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="astronomical">Астрономические (60 мин)</SelectItem>
+                <SelectItem value="academic">Академические (45 мин)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           {isLoading && !data ? (
             <Skeleton className="h-[420px] w-full" />
           ) : error ? (
@@ -167,12 +188,18 @@ export function TeachersTab() {
                       <TableHead className="w-[60px]">#</TableHead>
                       <TableHead className="min-w-[200px]">Преподаватель</TableHead>
                       <TableHead className="text-right">Занятий</TableHead>
-                      <TableHead className="text-right">Эфф. часов</TableHead>
-                      <TableHead className="text-right">Заплан. часов</TableHead>
+                      <TableHead className="text-right">
+                        {hoursMode === 'academic' ? 'Эфф. ак. часов' : 'Эфф. часов'}
+                      </TableHead>
+                      <TableHead className="text-right">
+                        {hoursMode === 'academic' ? 'Заплан. ак. часов' : 'Заплан. часов'}
+                      </TableHead>
                       <TableHead className="w-[200px]">Нагрузка (эфф.)</TableHead>
                       <TableHead className="text-right">Одновр. группы</TableHead>
                       <TableHead className="text-right">Одновр. событий</TableHead>
-                      <TableHead className="text-right">Экономия, ч</TableHead>
+                      <TableHead className="text-right">
+                        {hoursMode === 'academic' ? 'Экономия, ак. ч' : 'Экономия, ч'}
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
