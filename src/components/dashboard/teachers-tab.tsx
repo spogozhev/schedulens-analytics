@@ -1,10 +1,11 @@
 'use client'
 
 import * as React from 'react'
-import { Layers, Search } from 'lucide-react'
+import { FileDown, Layers, Search } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
@@ -25,7 +26,8 @@ import { MiniBar } from './charts'
 import { PaginationFooter, useDebouncedValue } from './pagination-footer'
 import { formatHours, formatNumber } from './palette'
 import { useDashboardStore, buildFilterQuery } from '@/lib/dashboard-store'
-import { useTeachers, useTopLevelUnits, type HoursMode } from '@/lib/api-hooks'
+import { useTeachers, useTopLevelUnits, buildTeachersExportUrl, type HoursMode } from '@/lib/api-hooks'
+import { downloadFile } from '@/lib/download'
 import type { TeacherSortKey } from '@/lib/analytics'
 
 export function TeachersTab() {
@@ -77,6 +79,26 @@ export function TeachersTab() {
   const handlePageSizeChange = (n: number) => {
     setPageSize(n)
     setPage(1)
+  }
+
+  const [exporting, setExporting] = React.useState(false)
+  const [exportError, setExportError] = React.useState<string | null>(null)
+
+  // Download the rating as .xlsx for the current filters, sort, search and
+  // hour mode — all rows, not just the visible page.
+  const handleExport = async () => {
+    setExporting(true)
+    setExportError(null)
+    try {
+      await downloadFile(
+        buildTeachersExportUrl(query, { sort, search }, hoursMode),
+        'teachers-rating.xlsx',
+      )
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setExporting(false)
+    }
   }
 
   return (
@@ -153,23 +175,40 @@ export function TeachersTab() {
             Эффективные часы — это сумма интервалов времени преподавателя без двойного учёта
             одновременных занятий. Запланированные — это прямая сумма длительностей всех событий.
             Загрузка выполняется страницами (по {pageSize} на страницу), поиск — серверный.
+            Экспорт в Excel выгружает все найденные строки, а не только текущую страницу.
             {hoursMode === 'academic' &&
               ' Часы показаны академические: 90 астрономических минут = 120 академических (×4/3).'}
           </CardDescription>
         </CardHeader>
         <CardContent>
           {/* Hour-unit selector for this table: astronomical or academic (×4/3). */}
-          <div className="flex items-center justify-end gap-2 pb-3">
-            <span className="text-xs text-muted-foreground">Часы</span>
-            <Select value={hoursMode} onValueChange={(v) => setHoursMode(v as HoursMode)}>
-              <SelectTrigger className="w-[220px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="astronomical">Астрономические (60 мин)</SelectItem>
-                <SelectItem value="academic">Академические (45 мин)</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-3">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleExport}
+                disabled={exporting || total === 0}
+              >
+                <FileDown />
+                {exporting ? 'Экспорт…' : 'Экспорт в Excel'}
+              </Button>
+              {exportError && (
+                <span className="text-xs text-destructive">Ошибка экспорта: {exportError}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Часы</span>
+              <Select value={hoursMode} onValueChange={(v) => setHoursMode(v as HoursMode)}>
+                <SelectTrigger className="w-[220px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="astronomical">Астрономические (60 мин)</SelectItem>
+                  <SelectItem value="academic">Академические (45 мин)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
           {isLoading && !data ? (
             <Skeleton className="h-[420px] w-full" />

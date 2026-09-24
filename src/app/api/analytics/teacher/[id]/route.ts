@@ -58,6 +58,9 @@ async function loadTeacherDetail(id: number, where: Prisma.ScheduleEventWhereInp
           rawEnd: true,
           lectureHash: true,
           subject: { select: { name: true } },
+          // The primary location is denormalized into `location`; the
+          // `locations` join table holds only ADDITIONAL locations.
+          location: { select: { displayName: true } },
           locations: { include: { location: { select: { displayName: true } } } },
           groups: { include: { group: { select: { name: true } } } },
         },
@@ -165,6 +168,8 @@ async function loadTeacherDetail(id: number, where: Prisma.ScheduleEventWhereInp
   for (const e of events) byKindMap.set(e.kindCode, (byKindMap.get(e.kindCode) ?? 0) + 1)
 
   // Recent events (max 100) — derive co-teachers from the lectureHash map
+  const addressOf = (e: (typeof events)[number]) =>
+    [...(e.location ? [e.location.displayName] : []), ...e.locations.map((l) => l.location.displayName)]
   const recentEvents = recentEventsRaw.map((e) => ({
     id: e.id,
     start: e.startDateTime.toISOString(),
@@ -179,7 +184,7 @@ async function loadTeacherDetail(id: number, where: Prisma.ScheduleEventWhereInp
     dateStr: e.dateStr,
     isCanceled: e.isCanceled,
     simultaneousGroupId: e.simultaneousGroupId,
-    locations: e.locations.map((l) => l.location.displayName),
+    locations: addressOf(e),
     groups: e.groups.map((g) => g.group.name),
     coEducators: coTeachersByHash.get(e.lectureHash) ?? [],
   }))
@@ -195,7 +200,7 @@ async function loadTeacherDetail(id: number, where: Prisma.ScheduleEventWhereInp
       start: e.startDateTime.toISOString(),
       end: e.endDateTime.toISOString(),
       subject: e.subject.name,
-      locations: e.locations.map((l) => l.location.displayName),
+      locations: addressOf(e),
       groups: e.groups.map((gg) => gg.group.name),
     })),
   }))

@@ -217,6 +217,25 @@ export function useTeachers(filters: string, params: PaginationParams, hoursMode
   })
 }
 
+/**
+ * URL of the .xlsx export of the teachers rating: the same filters, sort,
+ * search and hour mode as useTeachers, but without pagination — the file
+ * always contains every teacher matching the current filters.
+ */
+export function buildTeachersExportUrl(
+  filters: string,
+  params: Pick<PaginationParams, 'sort' | 'search'>,
+  hoursMode: HoursMode = 'astronomical',
+) {
+  const query = new URLSearchParams({
+    ...(filters ? Object.fromEntries(new URLSearchParams(filters)) : {}),
+    sort: params.sort,
+    search: params.search,
+    ...(hoursMode === 'academic' ? { hours: 'academic' } : {}),
+  }).toString()
+  return `${API_BASE}/teachers/export?${query}`
+}
+
 export function useRooms(filters: string, params: PaginationParams) {
   const query = new URLSearchParams({
     ...(filters ? Object.fromEntries(new URLSearchParams(filters)) : {}),
@@ -255,6 +274,15 @@ export function useTeacherDetail(id: number | null, filters: string) {
     queryKey: ['teacher', id, filters],
     queryFn: () => fetchJson(`${API_BASE}/teacher/${id}?${filters}`),
   })
+}
+
+/**
+ * URL of the .xlsx export with the teacher's full event list: the same
+ * filters as the teacher card, but every event instead of the recent-100
+ * sample shown in the card.
+ */
+export function buildTeacherEventsExportUrl(id: number, filters: string) {
+  return `${API_BASE}/teacher/${id}/export${filters ? `?${filters}` : ''}`
 }
 
 export function useRoomDetail(id: number | null, filters: string) {

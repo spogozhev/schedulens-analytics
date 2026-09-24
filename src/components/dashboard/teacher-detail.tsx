@@ -4,6 +4,7 @@ import * as React from 'react'
 import {
   CalendarClock,
   Clock,
+  FileDown,
   GraduationCap,
   Layers,
   MapPin,
@@ -21,6 +22,7 @@ import {
 } from '@/components/ui/dialog'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
@@ -33,7 +35,8 @@ import {
 import { BarChartCard, LineChartCard } from './charts'
 import { DAY_NAMES_RU_SHORT, formatDateTime, formatHours, formatNumber, formatTime, KIND_LABELS, SEQUENCE } from './palette'
 import { useDashboardStore, buildFilterQuery } from '@/lib/dashboard-store'
-import { useTeacherDetail } from '@/lib/api-hooks'
+import { useTeacherDetail, buildTeacherEventsExportUrl } from '@/lib/api-hooks'
+import { downloadFile } from '@/lib/download'
 
 export function TeacherDetailDialog() {
   const selectedTeacherId = useDashboardStore((s) => s.selectedTeacherId)
@@ -44,6 +47,30 @@ export function TeacherDetailDialog() {
 
   const open = selectedTeacherId !== null
   const handleClose = () => setSelectedTeacher(null)
+
+  const [exporting, setExporting] = React.useState(false)
+  const [exportError, setExportError] = React.useState<string | null>(null)
+
+  // Don't carry an error message from one teacher card to the next.
+  React.useEffect(() => setExportError(null), [selectedTeacherId])
+
+  // Download ALL of the teacher's events (not just the recent-100 sample
+  // shown above) for the current dashboard filters.
+  const handleExport = async () => {
+    if (selectedTeacherId === null) return
+    setExporting(true)
+    setExportError(null)
+    try {
+      await downloadFile(
+        buildTeacherEventsExportUrl(selectedTeacherId, query),
+        `teacher-events-${selectedTeacherId}.xlsx`,
+      )
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setExporting(false)
+    }
+  }
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && handleClose()}>
@@ -209,7 +236,26 @@ export function TeacherDetailDialog() {
               {/* Recent events */}
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-sm">Последние занятия (макс. 100)</CardTitle>
+                  <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
+                    <span>Последние занятия (макс. 100)</span>
+                    <span className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleExport}
+                        disabled={exporting || !data}
+                        title="Выгрузить в Excel все события преподавателя за период фильтров, а не только последние 100"
+                      >
+                        <FileDown />
+                        {exporting ? 'Экспорт…' : 'Все занятия в Excel'}
+                      </Button>
+                      {exportError && (
+                        <span className="text-xs text-destructive">
+                          Ошибка экспорта: {exportError}
+                        </span>
+                      )}
+                    </span>
+                  </CardTitle>
                   <CardDescription>
                     <span className="inline-flex items-center gap-1.5">
                       <span className="inline-block h-2 w-2 rounded-full bg-orange-500" />
@@ -226,7 +272,6 @@ export function TeacherDetailDialog() {
                           <TableHead>Время</TableHead>
                           <TableHead>Дисциплина</TableHead>
                           <TableHead>Тип</TableHead>
-                          <TableHead>Аудитория</TableHead>
                           <TableHead className="text-right">Групп</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -267,9 +312,6 @@ export function TeacherDetailDialog() {
                                   Одновр.
                                 </Badge>
                               )}
-                            </TableCell>
-                            <TableCell className="text-sm text-muted-foreground truncate max-w-[200px]" title={e.locations.join(', ')}>
-                              {e.locations[0] ?? '—'}
                             </TableCell>
                             <TableCell className="text-right tabular-nums">
                               {e.groups.length}
