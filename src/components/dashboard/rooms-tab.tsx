@@ -97,7 +97,7 @@ export function RoomsTab() {
               <SelectContent>
                 <SelectItem value="hours">Часы загрузки</SelectItem>
                 <SelectItem value="events">Количество событий</SelectItem>
-                <SelectItem value="uniqueLectures">Уникальных лекций</SelectItem>
+                <SelectItem value="uniqueLectures">Уникальных событий</SelectItem>
                 <SelectItem value="conflicts">Конфликты бронирования</SelectItem>
                 <SelectItem value="name">По названию (А→Я)</SelectItem>
               </SelectContent>
@@ -130,7 +130,7 @@ export function RoomsTab() {
             )}
           </CardTitle>
           <CardDescription>
-            Часы загрузки — это сумма длительностей <span className="font-medium">уникальных лекций</span> в
+            Часы загрузки — это сумма длительностей <span className="font-medium">уникальных занятий</span> в
             аудитории. Если несколько преподавателей ведут одно занятие (одна физическая лекция), она
             учитывается один раз. Загрузка страницами, поиск серверный.
           </CardDescription>
@@ -155,7 +155,7 @@ export function RoomsTab() {
                       <TableHead className="w-[60px]">#</TableHead>
                       <TableHead className="min-w-[260px]">Аудитория</TableHead>
                       <TableHead className="text-right">Всего событий</TableHead>
-                      <TableHead className="text-right">Уникальных лекций</TableHead>
+                      <TableHead className="text-right">Уникальных</TableHead>
                       <TableHead className="text-right">Часы загрузки</TableHead>
                       <TableHead className="w-[200px]">Загрузка</TableHead>
                       <TableHead className="text-right">Конфликтов</TableHead>

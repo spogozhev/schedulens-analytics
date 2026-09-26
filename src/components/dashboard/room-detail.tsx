@@ -71,7 +71,7 @@ export function RoomDetailDialog() {
               {/* KPIs */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                 <Kpi icon={CalendarClock} label="Всего событий" value={formatNumber(data.kpis.eventsCount)} accent="primary" />
-                <Kpi icon={Users} label="Уникальных лекций" value={formatNumber(data.kpis.uniqueLectures)} accent="secondary" />
+                <Kpi icon={Users} label="Уникальных событий" value={formatNumber(data.kpis.uniqueLectures)} accent="secondary" />
                 <Kpi icon={Clock} label="Часы загрузки" value={formatHours(data.kpis.hours)} accent="accent" />
                 <Kpi icon={AlertTriangle} label="Конфликтов" value={formatNumber(data.kpis.conflicts)} accent="warning" />
                 <Kpi icon={XCircle} label="Отменено" value={formatNumber(data.kpis.canceledLectures)} accent="warning" />

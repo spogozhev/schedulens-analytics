@@ -421,6 +421,29 @@ export async function computeTeacherWorkloadsPaginated(
   return { items, total, page, pageSize, totalPages }
 }
 
+/**
+ * Full (unpaginated) variant of the teachers rating for exports: the same
+ * filtering and sorting as computeTeacherWorkloadsPaginated, but returns
+ * every matching row. Shares the slow-cache with the paginated path, so an
+ * export right after viewing the table does not re-run the heavy SQL.
+ */
+export async function computeTeacherWorkloadsAll(
+  where: Prisma.ScheduleEventWhereInput,
+  options: {
+    sort: TeacherSortKey
+    search?: string
+    /** Restrict the list to educators of this first-level unit. */
+    topLevelUnitId?: number
+  },
+): Promise<TeacherWorkload[]> {
+  const idSet = await findEducatorIdsWithEvents(where, options.search, options.topLevelUnitId)
+  if (idSet.size === 0) return []
+  // Sorted so the cache key (and the SQL IN-list) is deterministic.
+  const educatorIds = [...idSet].sort((a, b) => a - b)
+  const workloads = await computeTeacherWorkloads(where, { educatorIds })
+  return sortTeachers(workloads, options.sort)
+}
+
 export interface RoomWorkload {
   id: number
   displayName: string

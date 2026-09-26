@@ -5,9 +5,9 @@ import { buildEventWhere, parseCommonFilters } from '@/lib/analytics'
 export const dynamic = 'force-dynamic'
 
 /**
- * Event counts per lesson form — data for the "По формам занятий" chart.
+ * Event counts per lesson form — data for the "По видам занятий" chart.
  * Events whose Subject carries no recognized form are bucketed as
- * "Без формы". Sorted by count descending.
+ * "Без вида". Sorted by count descending.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url)
@@ -24,8 +24,8 @@ export async function GET(request: Request) {
       id: g.lessonFormId,
       name:
         g.lessonFormId === null
-          ? 'Без формы'
-          : (formNames.get(g.lessonFormId) ?? `Форма #${g.lessonFormId}`),
+          ? 'Без вида'
+          : (formNames.get(g.lessonFormId) ?? `Вид #${g.lessonFormId}`),
       count: g._count._all,
     }))
     .sort((a, b) => b.count - a.count)

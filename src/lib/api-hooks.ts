@@ -197,20 +197,43 @@ export interface PaginationParams {
   search: string
 }
 
-export function useTeachers(filters: string, params: PaginationParams) {
+/** Hour units for the teachers rating table (academic = astronomical × 4/3). */
+export type HoursMode = 'astronomical' | 'academic'
+
+export function useTeachers(filters: string, params: PaginationParams, hoursMode: HoursMode = 'astronomical') {
   const query = new URLSearchParams({
     ...(filters ? Object.fromEntries(new URLSearchParams(filters)) : {}),
     sort: params.sort,
     page: String(params.page),
     pageSize: String(params.pageSize),
     search: params.search,
+    ...(hoursMode === 'academic' ? { hours: 'academic' } : {}),
   }).toString()
   return useQuery({
-    queryKey: ['teachers', filters, params],
+    queryKey: ['teachers', filters, params, hoursMode],
     queryFn: () => fetchJson(`${API_BASE}/teachers?${query}`),
     // Keep previous page's data while loading the next page (smoother UX).
     placeholderData: (prev) => prev,
   })
+}
+
+/**
+ * URL of the .xlsx export of the teachers rating: the same filters, sort,
+ * search and hour mode as useTeachers, but without pagination — the file
+ * always contains every teacher matching the current filters.
+ */
+export function buildTeachersExportUrl(
+  filters: string,
+  params: Pick<PaginationParams, 'sort' | 'search'>,
+  hoursMode: HoursMode = 'astronomical',
+) {
+  const query = new URLSearchParams({
+    ...(filters ? Object.fromEntries(new URLSearchParams(filters)) : {}),
+    sort: params.sort,
+    search: params.search,
+    ...(hoursMode === 'academic' ? { hours: 'academic' } : {}),
+  }).toString()
+  return `${API_BASE}/teachers/export?${query}`
 }
 
 export function useRooms(filters: string, params: PaginationParams) {
@@ -251,6 +274,15 @@ export function useTeacherDetail(id: number | null, filters: string) {
     queryKey: ['teacher', id, filters],
     queryFn: () => fetchJson(`${API_BASE}/teacher/${id}?${filters}`),
   })
+}
+
+/**
+ * URL of the .xlsx export with the teacher's full event list: the same
+ * filters as the teacher card, but every event instead of the recent-100
+ * sample shown in the card.
+ */
+export function buildTeacherEventsExportUrl(id: number, filters: string) {
+  return `${API_BASE}/teacher/${id}/export${filters ? `?${filters}` : ''}`
 }
 
 export function useRoomDetail(id: number | null, filters: string) {

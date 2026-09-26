@@ -49,12 +49,12 @@ export function FiltersBar() {
       />
 
       <MultiSelectFilter
-        label="Форма занятия"
+        label="Вид занятия"
         icon={<BookOpen className="h-4 w-4" />}
         options={lessonForms.map((f) => ({ id: f.id, label: f.name }))}
         selectedIds={selectedForms}
         onChange={(ids) => setFilter('lessonFormIds', ids)}
-        allLabel="Все формы"
+        allLabel="Все виды"
         width="w-[200px]"
       />
 
@@ -118,7 +118,7 @@ export function FiltersBar() {
       <div className="hidden sm:flex items-center gap-2 text-xs text-muted-foreground">
         <Filter className="h-3.5 w-3.5" />
         {selectedPeriods.length === 0 && selectedForms.length === 0
-          ? 'Без ограничения по периоду и форме'
+          ? 'Без ограничения по периоду и виду'
           : `Фильтров выбрано: ${selectedPeriods.length + selectedForms.length}`}
       </div>
     </div>

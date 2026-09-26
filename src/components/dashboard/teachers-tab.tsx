@@ -1,10 +1,11 @@
 'use client'
 
 import * as React from 'react'
-import { Layers, Search } from 'lucide-react'
+import { FileDown, Layers, Search } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
@@ -25,7 +26,8 @@ import { MiniBar } from './charts'
 import { PaginationFooter, useDebouncedValue } from './pagination-footer'
 import { formatHours, formatNumber } from './palette'
 import { useDashboardStore, buildFilterQuery } from '@/lib/dashboard-store'
-import { useTeachers, useTopLevelUnits } from '@/lib/api-hooks'
+import { useTeachers, useTopLevelUnits, buildTeachersExportUrl, type HoursMode } from '@/lib/api-hooks'
+import { downloadFile } from '@/lib/download'
 import type { TeacherSortKey } from '@/lib/analytics'
 
 export function TeachersTab() {
@@ -37,6 +39,8 @@ export function TeachersTab() {
   const [searchInput, setSearchInput] = React.useState('')
   const search = useDebouncedValue(searchInput, 300)
   const [topLevelUnitId, setTopLevelUnitId] = React.useState<string>('all')
+  // Astronomical by default; academic converts hours ×4/3 (90 astr. min = 120 acad. min).
+  const [hoursMode, setHoursMode] = React.useState<HoursMode>('astronomical')
   const { data: unitsMeta } = useTopLevelUnits()
 
   // Reset to first page whenever any filter changes.
@@ -45,7 +49,11 @@ export function TeachersTab() {
   const baseQuery = buildFilterQuery(filters)
   const query =
     topLevelUnitId !== 'all' ? `${baseQuery}&topLevelUnitId=${topLevelUnitId}` : baseQuery
-  const { data, isLoading, error, isFetching } = useTeachers(query, { page, pageSize, sort, search })
+  const { data, isLoading, error, isFetching } = useTeachers(
+    query,
+    { page, pageSize, sort, search },
+    hoursMode,
+  )
 
   const items = (data?.items ?? []) as Array<{
     id: number
@@ -71,6 +79,26 @@ export function TeachersTab() {
   const handlePageSizeChange = (n: number) => {
     setPageSize(n)
     setPage(1)
+  }
+
+  const [exporting, setExporting] = React.useState(false)
+  const [exportError, setExportError] = React.useState<string | null>(null)
+
+  // Download the rating as .xlsx for the current filters, sort, search and
+  // hour mode — all rows, not just the visible page.
+  const handleExport = async () => {
+    setExporting(true)
+    setExportError(null)
+    try {
+      await downloadFile(
+        buildTeachersExportUrl(query, { sort, search }, hoursMode),
+        'teachers-rating.xlsx',
+      )
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setExporting(false)
+    }
   }
 
   return (
@@ -147,9 +175,41 @@ export function TeachersTab() {
             Эффективные часы — это сумма интервалов времени преподавателя без двойного учёта
             одновременных занятий. Запланированные — это прямая сумма длительностей всех событий.
             Загрузка выполняется страницами (по {pageSize} на страницу), поиск — серверный.
+            Экспорт в Excel выгружает все найденные строки, а не только текущую страницу.
+            {hoursMode === 'academic' &&
+              ' Часы показаны академические: 90 астрономических минут = 120 академических (×4/3).'}
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {/* Hour-unit selector for this table: astronomical or academic (×4/3). */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-3">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleExport}
+                disabled={exporting || total === 0}
+              >
+                <FileDown />
+                {exporting ? 'Экспорт…' : 'Экспорт в Excel'}
+              </Button>
+              {exportError && (
+                <span className="text-xs text-destructive">Ошибка экспорта: {exportError}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Часы</span>
+              <Select value={hoursMode} onValueChange={(v) => setHoursMode(v as HoursMode)}>
+                <SelectTrigger className="w-[220px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="astronomical">Астрономические (60 мин)</SelectItem>
+                  <SelectItem value="academic">Академические (45 мин)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
           {isLoading && !data ? (
             <Skeleton className="h-[420px] w-full" />
           ) : error ? (
@@ -167,12 +227,18 @@ export function TeachersTab() {
                       <TableHead className="w-[60px]">#</TableHead>
                       <TableHead className="min-w-[200px]">Преподаватель</TableHead>
                       <TableHead className="text-right">Занятий</TableHead>
-                      <TableHead className="text-right">Эфф. часов</TableHead>
-                      <TableHead className="text-right">Заплан. часов</TableHead>
+                      <TableHead className="text-right">
+                        {hoursMode === 'academic' ? 'Эфф. ак. часов' : 'Эфф. часов'}
+                      </TableHead>
+                      <TableHead className="text-right">
+                        {hoursMode === 'academic' ? 'Заплан. ак. часов' : 'Заплан. часов'}
+                      </TableHead>
                       <TableHead className="w-[200px]">Нагрузка (эфф.)</TableHead>
                       <TableHead className="text-right">Одновр. группы</TableHead>
                       <TableHead className="text-right">Одновр. событий</TableHead>
-                      <TableHead className="text-right">Экономия, ч</TableHead>
+                      <TableHead className="text-right">
+                        {hoursMode === 'academic' ? 'Экономия, ак. ч' : 'Экономия, ч'}
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
