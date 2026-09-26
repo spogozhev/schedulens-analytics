@@ -4,12 +4,18 @@
  * Each file covers one last-name letter: { EducatorLastNameQuery, Educators:
  * [{ Id, DisplayName, FullName, Employments: [{ Position, Department }] }] }.
  *
- * For every educator:
+ * For every educator THAT HAS SCHEDULE EVENTS (see below):
  *   - the Educator row is upserted (Id = EducatorMasterId = Educator.id,
- *     DisplayName / FullName → displayName / longName). Educators missing
- *     from timetable files are created — Educator becomes the full roster;
+ *     DisplayName / FullName → displayName / longName);
  *   - Employments replace the educator's previous rows wholesale (the staff
  *     export is authoritative), deduplicated by (position, department).
+ *
+ * Only educators with at least one ScheduleEvent row are imported: the full
+ * HR roster contains many people who no longer teach, and event-less
+ * educators never show up in analytics. Run import-schedules.ts FIRST —
+ * otherwise there are no known event educators and the script aborts.
+ * (Event-less educators created by earlier runs can be removed once with
+ * scripts/prune-educators.ts.)
  *
  * Idempotent: re-running produces no changes when the source is unchanged.
  *
@@ -70,10 +76,27 @@ async function main(): Promise<void> {
 
   await setupPragmas()
 
+  // Only import staff records for educators that teach (have events).
+  // DISTINCT educatorId walks the (educatorId, startDateTime) index.
+  const eventEducatorIds = new Set(
+    (await db.scheduleEvent.groupBy({ by: ['educatorId'] })).map((r) => r.educatorId),
+  )
+  if (eventEducatorIds.size === 0) {
+    console.error(
+      'No schedule events in the database — the staff import would skip every record.\n' +
+        'Run scripts/import-schedules.ts first, then re-run import-staff.',
+    )
+    process.exit(1)
+  }
+  console.log(
+    `Educators with schedule events: ${eventEducatorIds.size} (other staff records will be skipped).`,
+  )
+
   let educatorsCreated = 0
   let educatorsUpdated = 0
   let employmentsTotal = 0
   let staffWithoutEmployments = 0
+  let skippedNoEvents = 0
   let skipped = 0
   let failedFiles = 0
   const departmentCache = new Map<string, number>()
@@ -114,6 +137,11 @@ async function main(): Promise<void> {
             for (const e of educators) {
               if (typeof e.Id !== 'number') {
                 skipped++
+                continue
+              }
+              // The person does not teach (no events) — not our audience.
+              if (!eventEducatorIds.has(e.Id)) {
+                skippedNoEvents++
                 continue
               }
               const existing = await tx.educator.findUnique({ where: { id: e.Id }, select: { id: true } })
@@ -174,7 +202,8 @@ async function main(): Promise<void> {
   const withEmployments = await db.employment.groupBy({ by: ['educatorId'], _count: { _all: true } })
   console.log('--- Summary ---')
   console.log(
-    `Educators: created ${educatorsCreated}, updated ${educatorsUpdated} (skipped records: ${skipped}, failed files: ${failedFiles}).`,
+    `Educators: created ${educatorsCreated}, updated ${educatorsUpdated} ` +
+      `(skipped: ${skippedNoEvents} without schedule events, ${skipped} bad records, ${failedFiles} failed files).`,
   )
   console.log(`Employments written: ${employmentsTotal}; educators without employments: ${staffWithoutEmployments}.`)
   console.log(

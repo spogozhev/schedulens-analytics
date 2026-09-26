@@ -195,9 +195,23 @@ bun run scripts/import-staff.ts [директория]   # по умолчани
 ```
 
 - upsert `Educator` по `Id` (`DisplayName` → displayName, `FullName` → longName);
-  преподаватели без расписаний тоже попадают в базу (полный штат);
+  **импортируются только преподаватели с событиями в расписании** — записи
+  «не преподающих» пропускаются (полная кадровая выгрузка содержит много
+  уволившихся); поэтому порядок импорта строгий: сначала
+  `import-schedules.ts`, потом штат;
 - должности (`Position` + `Department`) заменяются содержимым выгрузки,
   название подразделения резолвится в справочник `Department`.
+
+### `scripts/prune-educators.ts` — разовая очистка (без расписания)
+
+Удаляет `Educator` без событий в расписании (каскадно снимая их `Employment`,
+`EmployeeMatch`, `PlannedLoad`) — применяется один раз после того, как раньше
+штат импортировался полностью. По умолчанию — dry-run, удаление — флагом:
+
+```bash
+bun run scripts/prune-educators.ts            # показать, что будет удалено
+bun run scripts/prune-educators.ts --apply    # удалить
+```
 
 ### `scripts/import-employees.ts` — текущие сотрудники
 
@@ -355,10 +369,11 @@ bun run db:schema   # → db_schema.md (Mermaid ER-диаграмма + опис
 │   └── assignment.xlsx              # планируемая нагрузка (академические часы)
 ├── scripts/
 │   ├── import-schedules.ts          # импорт расписаний (+ периоды, формы, адреса)
-│   ├── import-staff.ts              # штат и должности
+│   ├── import-staff.ts              # штат и должности (только преподающие)
 │   ├── import-employees.ts          # текущие сотрудники → подразделения 1-го уровня
 │   ├── import-assignment.ts         # планируемая нагрузка → PlannedLoad
 │   ├── invalidate-cache.ts          # сброс кэша сервера после импорта
+│   ├── prune-educators.ts           # разовая очистка преподавателей без расписания
 │   ├── lesson-forms.ts              # словарь форм занятий + парсер
 │   ├── address-parse.ts             # парсер адреса из названия аудитории
 │   ├── use-db.ts                    # переключение провайдера sqlite/postgresql
