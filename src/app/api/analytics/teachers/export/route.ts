@@ -37,6 +37,7 @@ export async function GET(request: Request) {
     eventsCount: t.eventsCount,
     effectiveHours: roundHours(t.effectiveMinutes * factor),
     scheduledHours: roundHours(t.scheduledMinutes * factor),
+    plannedHours: roundHours(t.plannedMinutes * factor),
     simultaneousGroups: t.simultaneousGroups,
     simultaneousEvents: t.simultaneousEvents,
     timeSavedHours: roundHours((t.scheduledMinutes - t.effectiveMinutes) * factor),

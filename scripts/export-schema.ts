@@ -115,13 +115,17 @@ async function pgTables(): Promise<TableInfo[]> {
       dflt: c.column_default ?? null,
       pk: false, // filled below
     }))
+    // to_regclass('public."Address"') — имя в двойных кавычках: без них PG
+    // складывает идентификатор в нижний регистр и PascalCase-таблица
+    // «не находится» (ошибка 42P01 relation does not exist).
     const pkCols = new Set(
       (
         (await q(
           `SELECT a.attname AS name
              FROM pg_index i
              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-            WHERE i.indrelid = '${name.replace(/'/g, "''")}'::regclass AND i.indisprimary`,
+            WHERE i.indrelid = to_regclass($1) AND i.indisprimary`,
+          [`public."${name}"`],
         )) as Array<any>
       ).map((r) => r.name),
     )
@@ -155,15 +159,19 @@ async function pgTables(): Promise<TableInfo[]> {
       unique: String(i.def).toUpperCase().startsWith('CREATE UNIQUE'),
       columns: [],
     }))
-    // Column list per index: pg_attribute via the index relation.
+    // Column list per index. indkey содержит attnum'ы КОЛОННОК ТАБЛИЦЫ (не
+    // индексного отношения!) — join по pg_attribute таблицы через
+    // unnest WITH ORDINALITY, чтобы сохранить порядок колонок индекса.
     for (const idx of indexes) {
       idx.columns = (
         (await q(
           `SELECT a.attname AS name
              FROM pg_index i
-             JOIN pg_attribute a ON a.attrelid = i.indexrelid AND a.attnum = ANY(i.indkey)
-            WHERE i.indexrelid = '${idx.name.replace(/'/g, "''")}'::regclass
-            ORDER BY a.attnum`,
+             JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+            WHERE i.indexrelid = to_regclass($1)
+            ORDER BY k.ord`,
+          [`public."${idx.name}"`],
         )) as Array<any>
       ).map((r) => r.name)
     }

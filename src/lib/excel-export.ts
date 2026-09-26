@@ -11,6 +11,7 @@ export interface TeacherRatingRow {
   eventsCount: number
   effectiveHours: number
   scheduledHours: number
+  plannedHours: number
   simultaneousGroups: number
   simultaneousEvents: number
   timeSavedHours: number
@@ -51,9 +52,15 @@ export function buildTeachersRatingWorkbook(
       numFmt: HOURS_FMT,
     },
     {
-      header: academic ? 'Заплан. ак. часов' : 'Заплан. часов',
+      header: academic ? 'Часов в расп. (ак.)' : 'Часов в расп.',
       key: 'scheduledHours',
       width: 14,
+      numFmt: HOURS_FMT,
+    },
+    {
+      header: academic ? 'План. ак. часов' : 'План. часов',
+      key: 'plannedHours',
+      width: 13,
       numFmt: HOURS_FMT,
     },
     { header: 'Одновр. группы', key: 'simultaneousGroups', width: 13, numFmt: COUNT_FMT },
