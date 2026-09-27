@@ -5,14 +5,24 @@
  * year from upload/assignment.xlsx into the PlannedLoad table: per educator,
  * the sum of planned hours per schedule period (DateRange).
  *
- * Workbook layout (1-based columns):
- *   A — учебный период ("Семестр 1"…"Семестр 12", "1й год обучения"…)
- *   C — учебный год ("2025-2026 уч. год")
- *   E — дисциплина (clean name, no lesson-form tail)
- *   I — преподаватель: "Фамилия И. О., должность"
- *   J — табельный номер (uniquely identifies the person within the file)
- *   L — подразделение первого уровня
- *   M — количество часов
+ * Columns are resolved BY NAME from the header row — the physical order of
+ * the columns may change between exports:
+ *   "Учебный период"      — семестр ("Семестр 1"…"Семестр 12", "1й год обучения"…)
+ *   "Учебный год"         — "2025-2026 уч. год"
+ *   "Дисциплина"          — clean discipline name (no lesson-form tail)
+ *   "Виды учебной работы" — lesson kind (recognized; not used in the sums)
+ *   "Преподаватель"       — "Фамилия И. О., должность"
+ *   "Табельный номер"     — person id within the file (splits full тёзки)
+ *   "SAP-подразделение 1" — подразделение первого уровня
+ *   "Часов по плану"      — количество часов
+ * Optional "Фамилия" / "Имя" / "Отчество" columns, when present, take
+ * precedence over parsing the "Преподаватель" text: the person is built as
+ * "Фамилия И. О." from the full names.
+ * Rows with an EMPTY or ZERO "Табельный номер" belong to no specific person
+ * record (zero marks different people), so they are grouped by ФИО and then
+ * merged into the single same-ФИО tabular entry; kept as a standalone
+ * teacher when none exists; skipped when several namesakes make the
+ * attribution ambiguous (all logged).
  *
  * Period mapping (per the business rule): for "Y1-Y2 уч. год" the autumn
  * period is 1 Aug Y1 – 1 Feb Y2 (odd semesters 1,3,5,7,9,11) and the spring
@@ -37,8 +47,11 @@
  *     wins; everyone left unpaired (tie or all-zero scores) is logged as
  *     AMBIGUOUS and gets no plan.
  *
- * topLevelUnit for a matched educator is taken from column L (created in
- * the dictionary when missing). The file states hours in ACADEMIC hours;
+ * topLevelUnit for a matched educator is taken from "SAP-подразделение 1"
+ * (created in the dictionary when missing); when the file does not specify
+ * it, the educator is assigned to the default unit "ДГПХ СПбГУ".
+ * The file states hours in
+ * ACADEMIC hours;
  * they are converted at import into astronomical minutes (an academic hour
  * = 45 astronomical minutes) — the canonical unit every other minutes
  * column in the schema uses — so the plan and the actual load are directly
@@ -170,6 +183,9 @@ function periodSpecs(y1: number): { autumn: PeriodSpec; spring: PeriodSpec } {
 /** Академический час = 45 астрономических минут (пара 2 ак.ч = 90 мин). */
 const ACADEMIC_MINUTES = 45
 
+/** Подразделение по умолчанию, когда «SAP-подразделение 1» не указан. */
+const DEFAULT_UNIT = 'ДГПХ СПбГУ'
+
 // ---------- File model ----------
 
 interface FileTeacher {
@@ -188,39 +204,192 @@ function intersectionSize(a: Set<string>, b: Set<string> | undefined): number {
   return n
 }
 
-// ---------- Main ----------
+// ---------- Header mapping (columns are found BY NAME, not by position) ----------
 
-async function main() {
-  const file = process.argv[2] || './upload/assignment.xlsx'
-  const t0 = Date.now()
-  console.log(`Importing planned load from: ${file}`)
+/** Нормализованные названия колонок первой строки (см. norm). */
+const HEADER = {
+  period: 'учебный период',
+  year: 'учебный год',
+  subject: 'дисциплина',
+  teacher: 'преподаватель',
+  tabular: 'табельный номер',
+  hours: 'часов по плану',
+  surname: 'фамилия',
+  name: 'имя',
+  patronymic: 'отчество',
+} as const
 
-  // ---- Step 1: parse the workbook ----
-  const wb = new ExcelJS.Workbook()
-  await wb.xlsx.readFile(file)
-  const ws = wb.worksheets[0]
-  if (!ws) {
-    console.error('No worksheet found — aborting.')
-    process.exit(1)
+/** «SAP-подразделение 1» — суффикс, чтобы не зависеть от регистра/префикса (SAP/САП). */
+const isUnitHeader = (h: string): boolean => h.endsWith('подразделение 1')
+
+export interface ColumnMap {
+  /** Номер строки заголовков (данные начинаются со следующей). */
+  headerRow: number
+  period: number
+  year: number
+  subject: number
+  tabular: number
+  hours: number
+  unit: number
+  /** «Преподаватель» — опционально, если есть «Фамилия»(+Имя/Отчество). */
+  teacher?: number
+  surname?: number
+  name?: number
+  patronymic?: number
+}
+
+/**
+ * Находит строку заголовков (первую, где есть и «Учебный период», и
+ * «Табельный номер») и строит карту «нормализованное название → номер
+ * колонки». Отсутствие обязательных колонок — ошибка с их перечнем.
+ */
+export function mapColumns(ws: ExcelJS.Worksheet): ColumnMap {
+  for (let n = 1; n <= Math.min(25, ws.rowCount); n++) {
+    const idx = new Map<string, number>()
+    ws.getRow(n).eachCell({ includeEmpty: false }, (cell, colNumber) => {
+      const h = norm(cellText(cell.value))
+      if (!h || idx.has(h)) return
+      idx.set(h, colNumber)
+    })
+    if (!idx.has(HEADER.period) || !idx.has(HEADER.tabular)) continue
+
+    const missing: string[] = []
+    for (const key of [HEADER.year, HEADER.subject, HEADER.hours] as const) {
+      if (!idx.has(key)) missing.push(`«${key}»`)
+    }
+    const unitEntry = [...idx.entries()].find(([h]) => isUnitHeader(h))
+    if (!unitEntry) missing.push(`«…подразделение 1»`)
+    const teacher = idx.get(HEADER.teacher)
+    const surname = idx.get(HEADER.surname)
+    if (teacher === undefined && surname === undefined) {
+      missing.push(`«${HEADER.teacher}» (или «${HEADER.surname}»)`)
+    }
+    if (missing.length > 0) {
+      throw new Error(`В строке заголовков не найдены колонки: ${missing.join(', ')}`)
+    }
+
+    return {
+      headerRow: n,
+      period: idx.get(HEADER.period)!,
+      year: idx.get(HEADER.year)!,
+      subject: idx.get(HEADER.subject)!,
+      tabular: idx.get(HEADER.tabular)!,
+      hours: idx.get(HEADER.hours)!,
+      unit: unitEntry![1],
+      teacher,
+      surname,
+      name: idx.get(HEADER.name),
+      patronymic: idx.get(HEADER.patronymic),
+    }
   }
+  throw new Error(
+    'Строка заголовков не найдена (ожидались колонки «Учебный период» и «Табельный номер»).',
+  )
+}
 
+export interface ParsedWorkbook {
+  teachers: Map<string, FileTeacher>
+  dataRows: number
+  skippedUnrecognizedPeriod: number
+  skippedBadRow: number
+}
+
+/** Разбор строк данных по карте колонок (заголовок и всё до него пропускается). */
+export function parseTeachers(ws: ExcelJS.Worksheet, cols: ColumnMap): ParsedWorkbook {
   const teachers = new Map<string, FileTeacher>()
   let dataRows = 0
   let skippedUnrecognizedPeriod = 0
   let skippedBadRow = 0
+  let noTabularMerged = 0
+  let noTabularKept = 0
+  let noTabularSkipped = 0
+  const noTabularSkippedFios: string[] = []
 
-  ws.eachRow({ includeEmpty: false }, (row) => {
-    const periodLabel = cellText(row.getCell(1).value).trim() // A
-    const yearLabel = cellText(row.getCell(3).value).trim() // C
-    const subject = cellText(row.getCell(5).value).trim() // E
-    const teacherRaw = cellText(row.getCell(9).value).trim() // I
-    const tabularRaw = row.getCell(10).value // J
-    const unit = cellText(row.getCell(12).value).trim() // L
-    const hours = cellNumber(row.getCell(13).value) // M
+  // Строки с пустым «Табельный номер» копятся по ФИО и после разбора
+  // присоединяются к единственной записи того же ФИО (см. merge ниже).
+  const noTabular = new Map<string, { t: FileTeacher; rows: number }>()
 
-    // Header / service rows: no hours, no teacher or no tabular number.
-    if (hours === null || !teacherRaw || tabularRaw === null || tabularRaw === undefined) {
-      if (cellText(row.getCell(13).value).trim() !== '') skippedBadRow++
+  const accumulate = (
+    t: FileTeacher,
+    subject: string,
+    unit: string,
+    periodText: string,
+    hours: number,
+  ) => {
+    if (subject) t.subjects.add(norm(subject))
+    if (unit) t.unitCounts.set(unit, (t.unitCounts.get(unit) ?? 0) + 1)
+    // Файл задаёт академические часы → сразу переводим в астрономические
+    // минуты (канонические единицы схемы), чтобы план и факт сравнивались
+    // напрямую и показывались в любом режиме часов без особых веток.
+    t.minutesByPeriod.set(
+      periodText,
+      (t.minutesByPeriod.get(periodText) ?? 0) + Math.round(hours * ACADEMIC_MINUTES),
+    )
+  }
+
+  ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+    if (rowNumber <= cols.headerRow) return
+    const cell = (n: number | undefined): string =>
+      n === undefined ? '' : cellText(row.getCell(n).value).trim()
+
+    const periodLabel = cell(cols.period)
+    const yearLabel = cell(cols.year)
+    const subject = cell(cols.subject)
+    const unit = cell(cols.unit)
+    const hours = cellNumber(row.getCell(cols.hours).value)
+
+    // Табельный нормализуем (выгрузки встречают «175 608» и «175608»).
+    const tabularRaw = row.getCell(cols.tabular).value
+    const tabularRawText =
+      tabularRaw === null || tabularRaw === undefined ? '' : cellText(tabularRaw).replace(/\s+/g, '')
+    // Табельный «0» = отсутствующий: нулём помечены РАЗНЫЕ люди, группировать
+    // по нему нельзя — разделяет тёзок только настоящий номер.
+    const hasTabular = tabularRawText !== '' && tabularRawText !== '0'
+
+    // Преподаватель: колонки «Фамилия»/«Имя»/«Отчество» (если заполнены)
+    // надёжнее разбора текста — строим «Фамилия И. О.» из полных имён;
+    // иначе берём текст «Преподаватель» (до первой запятой — должность).
+    const surname = cell(cols.surname)
+    const initials = [cell(cols.name), cell(cols.patronymic)]
+      .filter(Boolean)
+      .map((s) => `${s[0].toUpperCase()}.`)
+      .join(' ')
+    let teacherRaw = surname && initials ? `${surname} ${initials}` : ''
+    if (!teacherRaw) teacherRaw = cell(cols.teacher)
+
+    if (hours === null || !teacherRaw || !hasTabular) {
+      if (cell(cols.hours) === '') return // служебная строка
+      if (hours !== null && teacherRaw && !hasTabular) {
+        // Часы есть, преподаватель есть, табельного нет — копим по ФИО.
+        const fio = teacherRaw.split(',')[0].trim()
+        const k = fioKey(fio)
+        let b = noTabular.get(k)
+        if (!b) {
+          b = {
+            t: {
+              tabular: 'без таб.',
+              fio,
+              fioK: k,
+              subjects: new Set(),
+              unitCounts: new Map(),
+              minutesByPeriod: new Map(),
+            },
+            rows: 0,
+          }
+          noTabular.set(k, b)
+        }
+        const autumn0 = isAutumnPeriod(periodLabel)
+        const y10 = parseYearStart(yearLabel)
+        if (autumn0 !== null && y10 !== null) {
+          const pa = periodSpecs(y10)
+          accumulate(b.t, subject, unit, autumn0 ? pa.autumn.displayText : pa.spring.displayText, hours)
+          b.rows++
+        } else {
+          skippedUnrecognizedPeriod++
+        }
+      } else {
+        skippedBadRow++
+      }
       return
     }
     const autumn = isAutumnPeriod(periodLabel)
@@ -232,34 +401,88 @@ async function main() {
     }
     dataRows++
 
-    const tabular = cellText(tabularRaw).trim()
-    let t = teachers.get(tabular)
+    let t = teachers.get(tabularRawText)
     if (!t) {
       const fio = teacherRaw.split(',')[0].trim()
       t = {
-        tabular,
+        tabular: tabularRawText,
         fio,
         fioK: fioKey(fio),
         subjects: new Set(),
         unitCounts: new Map(),
         minutesByPeriod: new Map(),
       }
-      teachers.set(tabular, t)
+      teachers.set(tabularRawText, t)
     }
-    if (subject) t.subjects.add(norm(subject))
-    if (unit) t.unitCounts.set(unit, (t.unitCounts.get(unit) ?? 0) + 1)
-
-    const { autumn: a, spring: s } = periodSpecs(y1)
-    const periodText = autumn ? a.displayText : s.displayText
-    // Файл задаёт академические часы → сразу переводим в астрономические
-    // минуты (канонические единицы схемы), чтобы план и факт сравнивались
-    // напрямую и показывались в любом режиме часов без особых веток.
-    t.minutesByPeriod.set(
-      periodText,
-      (t.minutesByPeriod.get(periodText) ?? 0) + Math.round(hours * ACADEMIC_MINUTES),
-    )
+    accumulate(t, subject, unit, autumn ? periodSpecs(y1).autumn.displayText : periodSpecs(y1).spring.displayText, hours)
   })
 
+  // Merge строк без табельного (по ФИО): одна запись-тёзка → часы ей;
+  // ни одной → самостоятельный преподаватель (сопоставится по ФИО как
+  // обычно); несколько тёзок → атрибутировать нельзя, строки пропускаются.
+  for (const [k, bucket] of noTabular) {
+    const namesakes = [...teachers.values()].filter((t) => t.fioK === k)
+    if (namesakes.length === 1) {
+      const t = namesakes[0]
+      for (const [p, m] of bucket.t.minutesByPeriod) {
+        t.minutesByPeriod.set(p, (t.minutesByPeriod.get(p) ?? 0) + m)
+      }
+      for (const s of bucket.t.subjects) t.subjects.add(s)
+      for (const [u, c] of bucket.t.unitCounts) {
+        t.unitCounts.set(u, (t.unitCounts.get(u) ?? 0) + c)
+      }
+      noTabularMerged += bucket.rows
+    } else if (namesakes.length === 0) {
+      teachers.set(`@${k}`, bucket.t)
+      noTabularKept += bucket.rows
+    } else {
+      noTabularSkipped += bucket.rows
+      noTabularSkippedFios.push(bucket.t.fio)
+    }
+  }
+  if (noTabularMerged + noTabularKept + noTabularSkipped > 0) {
+    console.log(
+      `  Rows without/with zero "Табельный номер": merged into single namesake = ${noTabularMerged}, ` +
+        `kept as standalone = ${noTabularKept}, skipped (multiple namesakes) = ${noTabularSkipped}` +
+        (noTabularSkippedFios.length > 0
+          ? ` (${[...new Set(noTabularSkippedFios)].slice(0, 10).join(', ')})`
+          : '') +
+        '.',
+    )
+  }
+
+  return { teachers, dataRows, skippedUnrecognizedPeriod, skippedBadRow }
+}
+
+// ---------- Main ----------
+
+async function main() {
+  const file = process.argv[2] || './upload/assignment.xlsx'
+  const t0 = Date.now()
+  console.log(`Importing planned load from: ${file}`)
+
+  // ---- Step 1: parse the workbook (columns by header names) ----
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.readFile(file)
+  const ws = wb.worksheets[0]
+  if (!ws) {
+    console.error('No worksheet found — aborting.')
+    process.exit(1)
+  }
+
+  const cols = mapColumns(ws)
+  const letter = (n: number | undefined) => (n === undefined ? '—' : ws.getColumn(n).letter)
+  console.log(
+    `Header row ${cols.headerRow}. Columns: период=${letter(cols.period)}, год=${letter(cols.year)}, ` +
+      `дисциплина=${letter(cols.subject)}, преподаватель=${letter(cols.teacher)}, ` +
+      `табельный=${letter(cols.tabular)}, подразделение=${letter(cols.unit)}, часы=${letter(cols.hours)}` +
+      (cols.surname !== undefined ? `, фамилия=${letter(cols.surname)}` : '') +
+      (cols.name !== undefined ? `, имя=${letter(cols.name)}` : '') +
+      (cols.patronymic !== undefined ? `, отчество=${letter(cols.patronymic)}` : '') +
+      '.',
+  )
+
+  const { teachers, dataRows, skippedUnrecognizedPeriod, skippedBadRow } = parseTeachers(ws, cols)
   console.log(
     `Parsed ${dataRows} rows: ${teachers.size} teacher(s); skipped: ` +
       `${skippedUnrecognizedPeriod} unrecognized period, ${skippedBadRow} bad row(s).`,
@@ -429,7 +652,13 @@ async function main() {
         )
         continue
       }
-      matches.push({ teacher: group[gi], educatorId: cands[ci].id, unit: unitOf(group[gi]), score: score[gi][ci] })
+      matches.push({
+        teacher: group[gi],
+        educatorId: cands[ci].id,
+        // Без подразделения в файле — ДГПХ СПбГУ (правило для совместителей).
+        unit: unitOf(group[gi]) || DEFAULT_UNIT,
+        score: score[gi][ci],
+      })
     }
   }
 
@@ -519,9 +748,13 @@ async function main() {
   await invalidateServerCache()
 }
 
-main()
-  .then(() => db.$disconnect())
-  .catch((e) => {
-    console.error(e)
-    return db.$disconnect().then(() => process.exit(1))
-  })
+// Run only when executed directly — the parsing helpers above are imported
+// by tests (import.meta.main is false on import).
+if (import.meta.main) {
+  main()
+    .then(() => db.$disconnect())
+    .catch((e) => {
+      console.error(e)
+      return db.$disconnect().then(() => process.exit(1))
+    })
+}
