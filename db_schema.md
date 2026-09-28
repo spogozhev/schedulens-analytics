@@ -1,8 +1,8 @@
 # Схема базы данных
 
-_Сгенерировано `2026-09-19T11:38:25.387Z` (SQLite) скриптом `bun run db:schema`._
+_Сгенерировано `2026-09-26T21:46:20.627Z` (PostgreSQL) скриптом `bun run db:schema`._
 
-Таблиц: **14**. Строк всего: **87 604**.
+Таблиц: **15**. Строк всего: **1 862 499**.
 
 ## ER-диаграмма
 
@@ -15,8 +15,8 @@ erDiagram
   DateRange {
     INTEGER id PK
     TEXT displayText
-    DATETIME dateFrom
-    DATETIME dateTo
+    TIMESTAMP_WITHOUT_TIME_ZONE dateFrom
+    TIMESTAMP_WITHOUT_TIME_ZONE dateTo
   }
   Department {
     INTEGER id PK
@@ -54,9 +54,15 @@ erDiagram
   Location {
     INTEGER id PK
     TEXT displayName
-    REAL latitude
-    REAL longitude
+    DOUBLE_PRECISION latitude
+    DOUBLE_PRECISION longitude
     INTEGER addressId FK
+  }
+  PlannedLoad {
+    INTEGER id PK
+    INTEGER educatorId FK
+    INTEGER dateRangeId FK
+    INTEGER plannedMinutes
   }
   Subject {
     INTEGER id PK
@@ -66,8 +72,8 @@ erDiagram
     TEXT id PK
     INTEGER educatorId FK
     INTEGER subjectId FK
-    DATETIME startDateTime
-    DATETIME endDateTime
+    TIMESTAMP_WITHOUT_TIME_ZONE startDateTime
+    TIMESTAMP_WITHOUT_TIME_ZONE endDateTime
     TEXT rawStart
     TEXT rawEnd
     BOOLEAN hasInferredEnd
@@ -75,8 +81,8 @@ erDiagram
     INTEGER dayOfWeek
     TEXT dayString
     TEXT dateStr
-    DATETIME termFrom
-    DATETIME termTo
+    TIMESTAMP_WITHOUT_TIME_ZONE termFrom
+    TIMESTAMP_WITHOUT_TIME_ZONE termTo
     BOOLEAN isSpringTerm
     BOOLEAN isCanceled
     INTEGER kindCode
@@ -98,10 +104,12 @@ erDiagram
   }
 
   Address ||--o{ Location : "addressId"
+  DateRange ||--o{ PlannedLoad : "dateRangeId"
   DateRange ||--o{ ScheduleEvent : "dateRangeId"
   Department ||--o{ Employment : "departmentId"
   Educator ||--o{ EmployeeMatch : "educatorId"
   Educator ||--o{ Employment : "educatorId"
+  Educator ||--o{ PlannedLoad : "educatorId"
   Educator ||--o{ ScheduleEvent : "educatorId"
   Group ||--o{ ScheduleEventGroup : "groupId"
   LessonForm ||--o{ ScheduleEvent : "lessonFormId"
@@ -119,17 +127,17 @@ erDiagram
 
 ### Address
 
-Строк: **33**.
+Строк: **159**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"Address_id_seq"'::regclass)` | PK |
 | `displayName` | TEXT | NO | — | UNIQUE |
 
 **Индексы:**
 
-- `Address_displayName_idx` → `displayName`
 - `Address_displayName_key` (UNIQUE) → `displayName`
+- `Address_displayName_idx` → `displayName`
 
 ### DateRange
 
@@ -137,15 +145,15 @@ erDiagram
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"DateRange_id_seq"'::regclass)` | PK |
 | `displayText` | TEXT | NO | — | UNIQUE |
-| `dateFrom` | DATETIME | NO | — | — |
-| `dateTo` | DATETIME | NO | — | — |
+| `dateFrom` | TIMESTAMP WITHOUT TIME ZONE | NO | — | — |
+| `dateTo` | TIMESTAMP WITHOUT TIME ZONE | NO | — | — |
 
 **Индексы:**
 
-- `DateRange_dateFrom_dateTo_idx` → `dateFrom, dateTo`
 - `DateRange_displayText_key` (UNIQUE) → `displayText`
+- `DateRange_dateFrom_dateTo_idx` → `dateFrom, dateTo`
 
 ### Department
 
@@ -153,31 +161,31 @@ erDiagram
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"Department_id_seq"'::regclass)` | PK |
 | `name` | TEXT | NO | — | UNIQUE |
 
 **Индексы:**
 
-- `Department_name_idx` → `name`
 - `Department_name_key` (UNIQUE) → `name`
+- `Department_name_idx` → `name`
 
 ### TopLevelUnit
 
-Строк: **31**.
+Строк: **45**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"TopLevelUnit_id_seq"'::regclass)` | PK |
 | `name` | TEXT | NO | — | UNIQUE |
 
 **Индексы:**
 
-- `TopLevelUnit_name_idx` → `name`
 - `TopLevelUnit_name_key` (UNIQUE) → `name`
+- `TopLevelUnit_name_idx` → `name`
 
 ### Educator
 
-Строк: **12 650**.
+Строк: **5 166**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
@@ -196,7 +204,7 @@ erDiagram
 
 ### EmployeeMatch
 
-Строк: **4 282**.
+Строк: **3 709**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
@@ -214,102 +222,123 @@ erDiagram
 
 ### Employment
 
-Строк: **25 092**.
+Строк: **13 937**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"Employment_id_seq"'::regclass)` | PK |
 | `educatorId` | INTEGER | NO | — | FK |
 | `position` | TEXT | NO | — | — |
 | `departmentId` | INTEGER | YES | — | FK |
 
 **Индексы:**
 
-- `Employment_educatorId_position_departmentId_key` (UNIQUE) → `educatorId, position, departmentId`
-- `Employment_departmentId_idx` → `departmentId`
-- `Employment_position_idx` → `position`
 - `Employment_educatorId_idx` → `educatorId`
+- `Employment_position_idx` → `position`
+- `Employment_departmentId_idx` → `departmentId`
+- `Employment_educatorId_position_departmentId_key` (UNIQUE) → `educatorId, position, departmentId`
 
 **Внешние ключи:**
 
-- `departmentId` → `Department.id`
 - `educatorId` → `Educator.id`
+- `departmentId` → `Department.id`
 
 ### Group
 
-Строк: **1 526**.
+Строк: **22 814**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"Group_id_seq"'::regclass)` | PK |
 | `name` | TEXT | NO | — | UNIQUE |
 
 **Индексы:**
 
-- `Group_name_idx` → `name`
 - `Group_name_key` (UNIQUE) → `name`
+- `Group_name_idx` → `name`
 
 ### LessonForm
 
-Строк: **23**.
+Строк: **29**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"LessonForm_id_seq"'::regclass)` | PK |
 | `name` | TEXT | NO | — | UNIQUE |
 
 **Индексы:**
 
-- `LessonForm_name_idx` → `name`
 - `LessonForm_name_key` (UNIQUE) → `name`
+- `LessonForm_name_idx` → `name`
 
 ### Location
 
-Строк: **517**.
+Строк: **2 016**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"Location_id_seq"'::regclass)` | PK |
 | `displayName` | TEXT | NO | — | UNIQUE |
-| `latitude` | REAL | YES | — | — |
-| `longitude` | REAL | YES | — | — |
+| `latitude` | DOUBLE PRECISION | YES | — | — |
+| `longitude` | DOUBLE PRECISION | YES | — | — |
 | `addressId` | INTEGER | YES | — | FK |
 
 **Индексы:**
 
-- `Location_addressId_idx` → `addressId`
-- `Location_displayName_idx` → `displayName`
 - `Location_displayName_key` (UNIQUE) → `displayName`
+- `Location_displayName_idx` → `displayName`
+- `Location_addressId_idx` → `addressId`
 
 **Внешние ключи:**
 
 - `addressId` → `Address.id`
 
-### Subject
+### PlannedLoad
 
-Строк: **1 836**.
+Строк: **6 977**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
-| `id` | INTEGER | NO | — | PK |
+| `id` | INTEGER | NO | `nextval('"PlannedLoad_id_seq"'::regclass)` | PK |
+| `educatorId` | INTEGER | NO | — | FK |
+| `dateRangeId` | INTEGER | NO | — | FK |
+| `plannedMinutes` | INTEGER | NO | — | — |
+
+**Индексы:**
+
+- `PlannedLoad_dateRangeId_idx` → `dateRangeId`
+- `PlannedLoad_educatorId_dateRangeId_key` (UNIQUE) → `educatorId, dateRangeId`
+
+**Внешние ключи:**
+
+- `educatorId` → `Educator.id`
+- `dateRangeId` → `DateRange.id`
+
+### Subject
+
+Строк: **55 732**.
+
+| Колонка | Тип | NULL | По умолчанию | Ключ |
+|---|---|---|---|---|
+| `id` | INTEGER | NO | `nextval('"Subject_id_seq"'::regclass)` | PK |
 | `name` | TEXT | NO | — | UNIQUE |
 
 **Индексы:**
 
-- `Subject_name_idx` → `name`
 - `Subject_name_key` (UNIQUE) → `name`
+- `Subject_name_idx` → `name`
 
 ### ScheduleEvent
 
-Строк: **18 798**.
+Строк: **844 737**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
 | `id` | TEXT | NO | — | PK |
 | `educatorId` | INTEGER | NO | — | FK |
 | `subjectId` | INTEGER | NO | — | FK |
-| `startDateTime` | DATETIME | NO | — | — |
-| `endDateTime` | DATETIME | NO | — | — |
+| `startDateTime` | TIMESTAMP WITHOUT TIME ZONE | NO | — | — |
+| `endDateTime` | TIMESTAMP WITHOUT TIME ZONE | NO | — | — |
 | `rawStart` | TEXT | NO | — | — |
 | `rawEnd` | TEXT | YES | — | — |
 | `hasInferredEnd` | BOOLEAN | NO | `false` | — |
@@ -317,8 +346,8 @@ erDiagram
 | `dayOfWeek` | INTEGER | NO | — | — |
 | `dayString` | TEXT | NO | — | — |
 | `dateStr` | TEXT | NO | — | — |
-| `termFrom` | DATETIME | NO | — | — |
-| `termTo` | DATETIME | NO | — | — |
+| `termFrom` | TIMESTAMP WITHOUT TIME ZONE | NO | — | — |
+| `termTo` | TIMESTAMP WITHOUT TIME ZONE | NO | — | — |
 | `isSpringTerm` | BOOLEAN | NO | — | — |
 | `isCanceled` | BOOLEAN | NO | `false` | — |
 | `kindCode` | INTEGER | NO | `0` | — |
@@ -332,30 +361,30 @@ erDiagram
 
 **Индексы:**
 
-- `ScheduleEvent_educatorId_startDateTime_subjectId_globalEventHash_key` (UNIQUE) → `educatorId, startDateTime, subjectId, globalEventHash`
-- `ScheduleEvent_lessonFormId_idx` → `lessonFormId`
-- `ScheduleEvent_dateRangeId_idx` → `dateRangeId`
-- `ScheduleEvent_locationId_idx` → `locationId`
-- `ScheduleEvent_kindCode_idx` → `kindCode`
-- `ScheduleEvent_lectureHash_idx` → `lectureHash`
-- `ScheduleEvent_globalEventHash_idx` → `globalEventHash`
-- `ScheduleEvent_simultaneousGroupId_idx` → `simultaneousGroupId`
-- `ScheduleEvent_subjectId_idx` → `subjectId`
-- `ScheduleEvent_endDateTime_idx` → `endDateTime`
-- `ScheduleEvent_startDateTime_idx` → `startDateTime`
 - `ScheduleEvent_educatorId_startDateTime_idx` → `educatorId, startDateTime`
+- `ScheduleEvent_startDateTime_idx` → `startDateTime`
+- `ScheduleEvent_endDateTime_idx` → `endDateTime`
+- `ScheduleEvent_subjectId_idx` → `subjectId`
+- `ScheduleEvent_simultaneousGroupId_idx` → `simultaneousGroupId`
+- `ScheduleEvent_globalEventHash_idx` → `globalEventHash`
+- `ScheduleEvent_lectureHash_idx` → `lectureHash`
+- `ScheduleEvent_kindCode_idx` → `kindCode`
+- `ScheduleEvent_locationId_idx` → `locationId`
+- `ScheduleEvent_dateRangeId_idx` → `dateRangeId`
+- `ScheduleEvent_lessonFormId_idx` → `lessonFormId`
+- `ScheduleEvent_educatorId_startDateTime_subjectId_globalEven_key` (UNIQUE) → `educatorId, startDateTime, subjectId, globalEventHash`
 
 **Внешние ключи:**
 
-- `lessonFormId` → `LessonForm.id`
-- `dateRangeId` → `DateRange.id`
-- `locationId` → `Location.id`
-- `subjectId` → `Subject.id`
 - `educatorId` → `Educator.id`
+- `subjectId` → `Subject.id`
+- `locationId` → `Location.id`
+- `dateRangeId` → `DateRange.id`
+- `lessonFormId` → `LessonForm.id`
 
 ### ScheduleEventGroup
 
-Строк: **18 601**.
+Строк: **831 400**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
@@ -368,12 +397,12 @@ erDiagram
 
 **Внешние ключи:**
 
-- `groupId` → `Group.id`
 - `eventId` → `ScheduleEvent.id`
+- `groupId` → `Group.id`
 
 ### ScheduleEventLocation
 
-Строк: **3 199**.
+Строк: **74 762**.
 
 | Колонка | Тип | NULL | По умолчанию | Ключ |
 |---|---|---|---|---|
@@ -386,5 +415,5 @@ erDiagram
 
 **Внешние ключи:**
 
-- `locationId` → `Location.id`
 - `eventId` → `ScheduleEvent.id`
+- `locationId` → `Location.id`

@@ -169,6 +169,8 @@ export interface TeacherWorkload {
   eventsCount: number
   scheduledMinutes: number
   effectiveMinutes: number
+  /** Планируемая нагрузка из assignment-файла (минуты), 0 — плана нет. */
+  plannedMinutes: number
   simultaneousEvents: number
   simultaneousGroups: number
   inferredEndEvents: number
@@ -335,6 +337,25 @@ async function computeTeacherWorkloadsUncached(
       ...params,
     )) as Array<Record<string, unknown>>
 
+    // Плановая нагрузка (assignment-файл): сумма по периодам, выбранным
+    // фильтром where; без фильтра периода — по всем плановым периодам.
+    // Зависит только от (educatorIds, dateRangeIds) — оба входят в ключ
+    // slowCached-обёртки, поэтому кэширование корректно.
+    const rangeFilter = where.dateRangeId as { in?: number[] } | undefined
+    const plannedRows = await db.plannedLoad.groupBy({
+      by: ['educatorId'],
+      _sum: { plannedMinutes: true },
+      where: {
+        educatorId: { in: rows.map((r) => Number(r.id)) },
+        ...(rangeFilter && Array.isArray(rangeFilter.in) && rangeFilter.in.length > 0
+          ? { dateRangeId: { in: rangeFilter.in } }
+          : {}),
+      },
+    })
+    const plannedByEducator = new Map(
+      plannedRows.map((p) => [p.educatorId, Number(p._sum.plannedMinutes ?? 0)]),
+    )
+
     return rows.map((r) => ({
       id: Number(r.id),
       displayName: String(r.displayName),
@@ -342,6 +363,7 @@ async function computeTeacherWorkloadsUncached(
       eventsCount: Number(r.eventsCount),
       scheduledMinutes: Number(r.scheduledMinutes),
       effectiveMinutes: Number(r.effectiveMinutes),
+      plannedMinutes: plannedByEducator.get(Number(r.id)) ?? 0,
       simultaneousEvents: Number(r.simultaneousEvents),
       simultaneousGroups: Number(r.simultaneousGroups),
       inferredEndEvents: Number(r.inferredEndEvents),

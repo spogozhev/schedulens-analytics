@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -32,6 +32,7 @@ model Educator {
   events           ScheduleEvent[]          @relation("PrimaryEducatorEvents")
   employments      Employment[]
   employeeMatches  EmployeeMatch[]
+  plannedLoads     PlannedLoad[]
 
   @@index([topLevelUnitId])
 }
@@ -144,9 +145,28 @@ model DateRange {
   dateFrom    DateTime
   dateTo      DateTime
 
-  events ScheduleEvent[]
+  events       ScheduleEvent[]
+  plannedLoads PlannedLoad[]
 
   @@index([dateFrom, dateTo])
+}
+
+/// Планируемая нагрузка преподавателя за период (DateRange) из файла
+/// upload/assignment.xlsx (scripts/import-assignment.ts): сумма часов плана
+/// по дисциплинам файла, отнесённым к этому периоду. Файл задаёт часы в
+/// АКАДЕМИЧЕСКИХ часах; хранятся они переведёнными в астрономические минуты
+/// (ак. час = 45 астр. минут) — как все остальные минуты схемы, чтобы план
+/// и факт сравнивались напрямую. Отсутствие записи = план 0.
+model PlannedLoad {
+  id             Int       @id @default(autoincrement())
+  educatorId     Int
+  educator       Educator  @relation(fields: [educatorId], references: [id], onDelete: Cascade)
+  dateRangeId    Int
+  dateRange      DateRange @relation(fields: [dateRangeId], references: [id], onDelete: Cascade)
+  plannedMinutes Int
+
+  @@unique([educatorId, dateRangeId])
+  @@index([dateRangeId])
 }
 
 /// A lesson form (лекция, экзамен, зачёт, …) parsed from the tail of the

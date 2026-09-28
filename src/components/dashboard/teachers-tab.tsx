@@ -62,6 +62,7 @@ export function TeachersTab() {
     eventsCount: number
     effectiveHours: number
     scheduledHours: number
+    plannedHours: number
     simultaneousEvents: number
     simultaneousGroups: number
     simultaneousTimeSavedHours: number
@@ -174,7 +175,9 @@ export function TeachersTab() {
           <CardDescription>
             Эффективные часы — это сумма интервалов времени преподавателя без двойного учёта
             одновременных занятий. Запланированные — это прямая сумма длительностей всех событий.
-            Загрузка выполняется страницами (по {pageSize} на страницу), поиск — серверный.
+            План — планируемая нагрузка из кадровой выгрузки (в выгрузке задана в академических
+            часах, показывается в выбранных единицах; «—» — преподавателя нет в выгрузке). Загрузка выполняется страницами (по {pageSize} на
+            страницу), поиск — серверный.
             Экспорт в Excel выгружает все найденные строки, а не только текущую страницу.
             {hoursMode === 'academic' &&
               ' Часы показаны академические: 90 астрономических минут = 120 академических (×4/3).'}
@@ -231,7 +234,10 @@ export function TeachersTab() {
                         {hoursMode === 'academic' ? 'Эфф. ак. часов' : 'Эфф. часов'}
                       </TableHead>
                       <TableHead className="text-right">
-                        {hoursMode === 'academic' ? 'Заплан. ак. часов' : 'Заплан. часов'}
+                        {hoursMode === 'academic' ? 'Часов в расп. (ак.)' : 'Часов в расп.'}
+                      </TableHead>
+                      <TableHead className="text-right">
+                        {hoursMode === 'academic' ? 'План. ак. часов' : 'План. часов'}
                       </TableHead>
                       <TableHead className="w-[200px]">Нагрузка (эфф.)</TableHead>
                       <TableHead className="text-right">Одновр. группы</TableHead>
@@ -272,6 +278,9 @@ export function TeachersTab() {
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-muted-foreground">
                           {formatHours(t.scheduledHours)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground">
+                          {t.plannedHours > 0 ? formatHours(t.plannedHours) : '—'}
                         </TableCell>
                         <TableCell>
                           <MiniBar value={t.effectiveHours} max={maxEffective} color="#ea580c" />
